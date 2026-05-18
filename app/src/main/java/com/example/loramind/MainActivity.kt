@@ -31,14 +31,21 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             LoraMindTheme {
-                Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
+                Scaffold(
+                    modifier = Modifier.fillMaxSize(),
+                    containerColor = com.example.loramind.ui.theme.DeepBlack
+                ) { innerPadding ->
 
                     val permissionLauncher = rememberLauncherForActivityResult(
                         contract = ActivityResultContracts.RequestMultiplePermissions()
                     ) { permissions ->
                         val allGranted = permissions.entries.all { it.value }
                         if (!allGranted) {
-                            Toast.makeText(this,"App needs permissions to work", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(
+                                this,
+                                getString(R.string.permission_required),
+                                Toast.LENGTH_SHORT
+                            ).show()
                             finish()
                         }
 
@@ -69,7 +76,7 @@ class MainActivity : ComponentActivity() {
 
                     val factory = object : ViewModelProvider.Factory {
                         override fun <T : ViewModel> create(modelClass: Class<T>): T {
-                            return ChatViewModel(useCase, localRepository) as T
+                            return ChatViewModel(useCase, localRepository, bluetoothRepository) as T
                         }
                     }
 

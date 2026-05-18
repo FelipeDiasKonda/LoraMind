@@ -1,3 +1,15 @@
 <resources>
     <string name="app_name">LoraMind</string>
+    <string name="app_title_lora">LORA</string>
+    <string name="app_title_mind">MIND</string>
+    <string name="offline_ai_badge">OFFLINE AI</string>
+    <string name="chat_input_placeholder">Digite sua mensagem…</string>
+    <string name="send_button_description">Enviar mensagem</string>
+    <string name="typing_indicator">IA pensando via LoRa…</string>
+    <string name="message_delivered">Entregue</string>
+    <string name="bluetooth_connected">Conectado</string>
+    <string name="bluetooth_disconnected">Desconectado</string>
+    <string name="permission_required">O app precisa de permissões para funcionar</string>
+    <string name="empty_chat_title">Nenhuma conversa ainda</string>
+    <string name="empty_chat_subtitle">Envie uma mensagem para começar\natravés da rede LoRa</string>
 </resources>
