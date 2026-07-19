@@ -1,9 +1,17 @@
 /*
- * LoraMind — ESP32 Nó 2 (Base / Servidor)
+ * LoraMind — ESP32 Base Station (Mesh Gateway)
  * 
- * BIDIRECIONAL:
- *   [IDA]   LoRa -> Serial USB  (mensagem do app chega no PC com prefixo MSG_LORAMIND:)
- *   [VOLTA] Serial USB -> LoRa  (resposta da IA volta com prefixo RESP_AI:)
+ * Protocolo Mesh (sem IDs de nó — roteamento por MSG_ID):
+ *   Pacote LoRa: LM|TIPO|MSG_ID|TTL|payload
+ * 
+ * Comportamento:
+ *   [IDA]   LoRa -> Serial USB  (pergunta chega da mesh, envia para Python)
+ *                                Formato: MSG_LORAMIND:MSG_ID|payload
+ *   [VOLTA] Serial USB -> LoRa  (resposta do Python, envia para a mesh)
+ *                                Formato recebido: RESP_AI:MSG_ID|payload
+ * 
+ * A Base Station é o único nó que PROCESSA perguntas (Q).
+ * Respostas (R) são enviadas de volta para a mesh com o mesmo MSG_ID.
  * 
  * Hardware:
  *   - ESP32 com módulo LoRa SX1276 (915MHz)
@@ -12,6 +20,11 @@
 
 #include <SPI.h>
 #include <LoRa.h>
+
+// ============================================================================
+// CONFIGURAÇÃO
+// ============================================================================
+#define DEFAULT_TTL 3          // TTL padrão para respostas enviadas
 
 // ============================================================================
 // PINOS
@@ -24,10 +37,20 @@
 #define DIO0 26
 
 // ============================================================================
-// PREFIXOS DO PROTOCOLO
+// PROTOCOLO
 // ============================================================================
+#define PACKET_DELIMITER '|'
+#define PACKET_PREFIX    "LM"
+
 const String MSG_PREFIX  = "MSG_LORAMIND:";
 const String RESP_PREFIX = "RESP_AI:";
+
+// ============================================================================
+// CACHE DE DUPLICATAS (para Q packets)
+// ============================================================================
+#define SEEN_CACHE_SIZE 20
+String seenCache[SEEN_CACHE_SIZE];
+int seenIndex = 0;
 
 // ============================================================================
 // BUFFER SERIAL
@@ -35,28 +58,130 @@ const String RESP_PREFIX = "RESP_AI:";
 String serialBuffer = "";
 
 // ============================================================================
+// ESTRUTURA DO PACOTE PARSED
+// ============================================================================
+struct MeshPacket {
+  bool valid;
+  char type;        // 'Q' ou 'R'
+  String msgId;     // ID da mensagem
+  int ttl;          // Hops restantes
+  String payload;   // Conteúdo
+};
+
+// ============================================================================
+// FUNÇÕES DE PROTOCOLO
+// ============================================================================
+
+/**
+ * Monta um pacote LoRa com header mesh.
+ * Formato: LM|TIPO|MSG_ID|TTL|payload
+ */
+String buildPacket(char type, String msgId, int ttl, String payload) {
+  String pkt = PACKET_PREFIX;
+  pkt += PACKET_DELIMITER;
+  pkt += type;
+  pkt += PACKET_DELIMITER;
+  pkt += msgId;
+  pkt += PACKET_DELIMITER;
+  pkt += String(ttl);
+  pkt += PACKET_DELIMITER;
+  pkt += payload;
+  return pkt;
+}
+
+/**
+ * Faz parse de um pacote LoRa recebido.
+ * Formato: LM|TIPO|MSG_ID|TTL|payload (4 delimitadores)
+ */
+MeshPacket parsePacket(String raw) {
+  MeshPacket pkt;
+  pkt.valid = false;
+
+  if (raw.length() < 13) return pkt;
+
+  int delimiters[4];
+  int count = 0;
+  for (int i = 0; i < (int)raw.length() && count < 4; i++) {
+    if (raw.charAt(i) == PACKET_DELIMITER) {
+      delimiters[count++] = i;
+    }
+  }
+
+  if (count < 4) return pkt;
+
+  String prefix = raw.substring(0, delimiters[0]);
+  if (prefix != PACKET_PREFIX) return pkt;
+
+  String typeStr = raw.substring(delimiters[0] + 1, delimiters[1]);
+  if (typeStr.length() != 1) return pkt;
+  pkt.type = typeStr.charAt(0);
+  if (pkt.type != 'Q' && pkt.type != 'R') return pkt;
+
+  pkt.msgId = raw.substring(delimiters[1] + 1, delimiters[2]);
+  if (pkt.msgId.length() < 2) return pkt;
+
+  String ttlStr = raw.substring(delimiters[2] + 1, delimiters[3]);
+  pkt.ttl = ttlStr.toInt();
+
+  pkt.payload = raw.substring(delimiters[3] + 1);
+  pkt.payload.trim();
+
+  pkt.valid = true;
+  return pkt;
+}
+
+/**
+ * Verifica duplicata de Q packets.
+ */
+bool isDuplicate(String msgId) {
+  for (int i = 0; i < SEEN_CACHE_SIZE; i++) {
+    if (seenCache[i] == msgId) {
+      return true;
+    }
+  }
+
+  seenCache[seenIndex] = msgId;
+  seenIndex = (seenIndex + 1) % SEEN_CACHE_SIZE;
+  return false;
+}
+
+/**
+ * Faz parse de uma resposta do Python no formato: MSG_ID|payload
+ */
+bool parseSerialResponse(String data, String &msgId, String &payload) {
+  int pipePos = data.indexOf('|');
+  if (pipePos < 0) return false;
+
+  msgId   = data.substring(0, pipePos);
+  payload = data.substring(pipePos + 1);
+  payload.trim();
+
+  return (msgId.length() > 0 && payload.length() > 0);
+}
+
+// ============================================================================
 // SETUP
 // ============================================================================
 
 void setup() {
   Serial.begin(115200);
-  Serial.println("[ESP2] ============================");
-  Serial.println("[ESP2] LoraMind Node 2 (Base) - INICIO");
-  Serial.println("[ESP2] Modo: BIDIRECIONAL");
-  Serial.println("[ESP2] LoRa->Serial (ida) | Serial->LoRa (volta)");
-  Serial.println("[ESP2] ============================");
+  Serial.println("[BS] ============================");
+  Serial.println("[BS] LoraMind Base Station - INICIO");
+  Serial.println("[BS] Modo: MESH GATEWAY");
+  Serial.println("[BS] LoRa<->Serial (bidirecional)");
+  Serial.println("[BS] ============================");
 
   // Inicializa LoRa
   SPI.begin(SCK, MISO, MOSI, SS);
   LoRa.setPins(SS, RST, DIO0);
 
   if (!LoRa.begin(915E6)) {
-    Serial.println("[ESP2] ERRO: LoRa nao inicializou!");
-    while (1); // Trava se LoRa falhar
+    Serial.println("[BS] ERRO: LoRa nao inicializou!");
+    while (1);
   }
 
-  Serial.println("[ESP2] LoRa 915MHz OK");
-  Serial.println("[ESP2] Pronto! Aguardando dados...");
+  Serial.println("[BS] LoRa 915MHz OK");
+  Serial.println("[BS] Pronto! Aguardando dados...");
 }
 
 // ============================================================================
@@ -64,7 +189,10 @@ void setup() {
 // ============================================================================
 
 void loop() {
-  // ----- CAMINHO DE IDA: LoRa -> Serial USB (para o Python) -----
+
+  // =====================================================================
+  // CAMINHO DE IDA: LoRa -> Serial USB (pergunta da mesh para o Python)
+  // =====================================================================
   int packetSize = LoRa.parsePacket();
   if (packetSize) {
     String recebido = "";
@@ -76,7 +204,7 @@ void loop() {
     int rssi = LoRa.packetRssi();
     float snr = LoRa.packetSnr();
 
-    Serial.print("[ESP2] LoRa recebido (RSSI:");
+    Serial.print("[BS] LoRa raw (RSSI:");
     Serial.print(rssi);
     Serial.print(" SNR:");
     Serial.print(snr);
@@ -84,71 +212,85 @@ void loop() {
     Serial.print(recebido);
     Serial.println("\"");
 
-    if (recebido.length() > 0) {
-      // Verifica se tem o prefixo de validação "LM:"
-      // Isso filtra ruído LoRa (pacotes aleatórios/interferência)
-      if (recebido.startsWith("LM:")) {
-        // Remove o prefixo LM: e envia para o script Python com MSG_LORAMIND:
-        String mensagem = recebido.substring(3);
-        mensagem.trim();
+    // Parse do header mesh
+    MeshPacket pkt = parsePacket(recebido);
 
-        if (mensagem.length() > 0) {
-          Serial.print(MSG_PREFIX);
-          Serial.println(mensagem);
+    if (!pkt.valid) {
+      Serial.println("[BS] DESCARTADO (header invalido)");
+      return;
+    }
 
-          Serial.print("[ESP2] Enviado para Python: ");
-          Serial.print(MSG_PREFIX);
-          Serial.println(mensagem);
-        }
-      } else {
-        // Pacote sem prefixo LM: = ruído/interferência — descarta
-        Serial.print("[ESP2] DESCARTADO (ruido LoRa): \"");
-        Serial.print(recebido.substring(0, 30));
-        Serial.println("\"");
+    Serial.print("[BS] Parsed: TIPO=");
+    Serial.print(pkt.type);
+    Serial.print(" ID=");
+    Serial.print(pkt.msgId);
+    Serial.print(" TTL=");
+    Serial.println(pkt.ttl);
+
+    if (pkt.type == 'Q') {
+      // Verificar duplicata
+      if (isDuplicate(pkt.msgId)) {
+        Serial.println("[BS] Q DESCARTADO (duplicata: " + pkt.msgId + ")");
+        return;
       }
+
+      // Pergunta para processar — enviar para Python
+      // Formato: MSG_LORAMIND:MSG_ID|payload
+      Serial.print(MSG_PREFIX);
+      Serial.print(pkt.msgId);
+      Serial.print("|");
+      Serial.println(pkt.payload);
+
+      Serial.print("[BS] -> Python: [");
+      Serial.print(pkt.msgId);
+      Serial.print("] \"");
+      Serial.print(pkt.payload);
+      Serial.println("\"");
+    } else {
+      // Tipo R na BS? Não deveria acontecer em topologia normal, mas relay se preciso
+      Serial.println("[BS] R recebido na BS — ignorando (inesperado)");
     }
   }
 
-  // ----- CAMINHO DE VOLTA: Serial USB -> LoRa (resposta da IA) -----
+  // =====================================================================
+  // CAMINHO DE VOLTA: Serial USB -> LoRa (resposta do Python para a mesh)
+  // =====================================================================
   while (Serial.available()) {
     char c = (char)Serial.read();
 
     if (c == '\n') {
-      // Linha completa recebida
       serialBuffer.trim();
 
       if (serialBuffer.startsWith(RESP_PREFIX)) {
-        // É uma resposta da IA!
-        String resposta = serialBuffer.substring(RESP_PREFIX.length());
-        resposta.trim();
+        // É uma resposta da IA
+        String data = serialBuffer.substring(RESP_PREFIX.length());
 
-        Serial.print("[ESP2] Resposta IA recebida do Python: \"");
-        Serial.print(resposta);
-        Serial.println("\"");
-
-        if (resposta.length() > 0) {
-          // Transmite via LoRa de volta para o ESP1
-          // Prefixo "LM:" para validação (filtrar ruído LoRa)
-          LoRa.beginPacket();
-          LoRa.print("LM:");
-          LoRa.print(resposta);
-          LoRa.endPacket();
-
-          Serial.print("[ESP2] LoRa enviado (resposta): \"");
-          Serial.print(resposta);
+        // Parse: MSG_ID|payload
+        String msgId, payload;
+        if (parseSerialResponse(data, msgId, payload)) {
+          Serial.print("[BS] Resposta IA [");
+          Serial.print(msgId);
+          Serial.print("]: \"");
+          Serial.print(payload);
           Serial.println("\"");
 
-          // Volta para modo recepção LoRa
+          // Monta pacote mesh de resposta e envia via LoRa
+          String packet = buildPacket('R', msgId, DEFAULT_TTL, payload);
+
+          LoRa.beginPacket();
+          LoRa.print(packet);
+          LoRa.endPacket();
+
+          Serial.print("[BS] LoRa enviado: \"");
+          Serial.print(packet);
+          Serial.println("\"");
+
           LoRa.receive();
+        } else {
+          Serial.println("[BS] ERRO: formato invalido: \"" + data + "\"");
         }
-      } else if (serialBuffer.length() > 0) {
-        // Dados da serial que não são RESP_AI: — ignora
-        Serial.print("[ESP2] Serial ignorado (sem prefixo RESP_AI:): \"");
-        Serial.print(serialBuffer);
-        Serial.println("\"");
       }
 
-      // Limpa buffer
       serialBuffer = "";
     } else {
       serialBuffer += c;

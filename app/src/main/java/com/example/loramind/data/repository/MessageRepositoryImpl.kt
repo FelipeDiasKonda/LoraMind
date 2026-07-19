@@ -1,6 +1,6 @@
 package com.example.loramind.data.repository
 
-import com.example.loramind.data.local.dao.MessageDao
+import com.example.loramind.data.local.MessageDao
 import com.example.loramind.data.local.entity.toEntity
 import com.example.loramind.domain.model.Message
 import com.example.loramind.domain.repository.MessageRepository

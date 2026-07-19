@@ -60,7 +60,7 @@ class BluetoothRepositoryImpl(
                     Log.d(TAG, "Device: ${it.name} - ${it.address}")
                 }
 
-                val device = pairedDevices.find { it.name == deviceName }
+                val device = pairedDevices.find { it.name?.startsWith(deviceName) == true }
 
                 if (device == null) {
                     Log.e(TAG, "DEVICE NAO ENCONTRADO")
@@ -101,7 +101,7 @@ class BluetoothRepositoryImpl(
                 if (socket?.isConnected != true) {
                     Log.e(TAG, "NAO CONECTADO - tentando conectar...")
 
-                    val connected = connectToDevice("LoraMind_Node")
+                    val connected = connectToDevice("LoraMind")
                     Log.d(TAG, "Resultado auto-connect: $connected")
 
                     if (!connected) {

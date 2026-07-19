@@ -1,4 +1,4 @@
-package com.example.loramind.data.local.dao
+package com.example.loramind.data.local
 
 import androidx.room.Dao
 import androidx.room.Insert
