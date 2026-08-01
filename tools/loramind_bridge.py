@@ -20,7 +20,7 @@ import argparse
 import json
 import sys
 import time
-from collections import deque
+from collections import defaultdict, deque
 from datetime import datetime
 
 # Força UTF-8 no stdout para Windows (evita erro com caracteres Unicode)
@@ -45,13 +45,21 @@ RESP_PREFIX = "RESP_AI:"
 # Número máximo de trocas (user+assistant) a manter no histórico
 MAX_HISTORY = 5
 
-# Prompt de sistema para o modelo
+# Prompt de sistema — adaptativo de idioma, conciso, texto corrido sem tópicos
 SYSTEM_PROMPT = (
-    "Você é o LoraMind, um assistente de IA offline que se comunica via rádio LoRa. "
-    "Responda de forma clara, útil e objetiva em português brasileiro. "
-    "Evite respostas excessivamente longas. "
-    "NÃO use markdown, headers, listas numeradas ou formatação. Apenas texto puro."
-    "Responda de forma direta e clara, sem enrolação apenas o que o usuario pedir."
+    "Você é o LoraMind, um assistente de emergência que opera offline via rádio LoRa. "
+    "Responda SEMPRE no mesmo idioma em que o usuário perguntar. "
+    "NUNCA fale para o usuario ligar para alguem ou pesquisar algo na internet. "
+    "Seja direto, prático e muito conciso (máximo 2 a 3 frases curtas em texto corrido). "
+    "NÃO use tópicos, listas numeradas, markdown ou formatação especial. "
+    "NÃO faça comentários sobre as regras, não critique o prompt e não explique seu raciocínio. "
+    "Nunca responda em inglês se o usuário falar em português."
+)
+
+# One-shot example — texto corrido, natural, curto e no mesmo idioma
+ONE_SHOT_USER = "Meu carro quebrou numa rodovia deserta à noite e não tenho sinal."
+ONE_SHOT_ASSISTANT = (
+    "Ligue o pisca-alerta, posicione o triângulo a 30 metros atrás do veículo e permaneça dentro do carro com as portas travadas. Ao amanhecer, caminhe pelo acostamento com segurança até o ponto habitado mais próximo."
 )
 
 # Tamanho máximo de cada chunk LoRa (reduzido para acomodar header mesh ~13 bytes)
@@ -64,8 +72,11 @@ CHUNK_DELAY = 2.0
 # HISTÓRICO DE CONVERSA (global — compartilhado entre todos os nós)
 # ============================================================================
 
-# Armazena as últimas MAX_HISTORY trocas como tuplas (user_msg, assistant_msg)
-conversation_history: deque = deque(maxlen=MAX_HISTORY)
+# Dict de conv_id -> deque de tuplas (user_msg, assistant_msg)
+# Cada conversa tem seu próprio contexto isolado
+conversation_histories: dict[str, deque] = defaultdict(
+    lambda: deque(maxlen=MAX_HISTORY)
+)
 
 # ============================================================================
 # CORES PARA O TERMINAL
@@ -194,23 +205,33 @@ def _clean_response(text):
 
     text = text.strip()
 
-    if "###" in text:
-        text = text[:text.index("###")].strip()
-
-    if "**" in text:
-        text = text[:text.index("**")].strip()
+    # Remove marcadores de meta-comentários ou quebras
+    meta_triggers = [
+        "###", "**", "_fonte", "modified answer", "instruction",
+        "i've noticed", "here's an improved", "note:", "user:", "assistant:"
+    ]
+    for trigger in meta_triggers:
+        lower_idx = text.lower().find(trigger)
+        if lower_idx != -1:
+            text = text[:lower_idx].strip()
 
     lines = text.split("\n")
     clean_lines = []
     for line in lines:
         line_stripped = line.strip()
-        if line_stripped.startswith("#") or line_stripped.startswith("Instruction"):
+        if line_stripped.startswith("#") or line_stripped.lower().startswith("instruction"):
             continue
         if line_stripped:
             clean_lines.append(line_stripped)
 
     text = " ".join(clean_lines)
     text = re.sub(r"\s+", " ", text).strip()
+
+    # Se a resposta foi cortada no meio de uma frase, apara até a última pontuação válida
+    if text and text[-1] not in ".!?":
+        last_punct = max(text.rfind("."), text.rfind("!"), text.rfind("?"))
+        if last_punct > 0:
+            text = text[:last_punct + 1].strip()
 
     return text
 
@@ -253,8 +274,12 @@ def parse_mesh_message(line):
     """
     Faz parse de uma mensagem da serial no formato:
       MSG_LORAMIND:MSG_ID|payload
-
-    Retorna (msg_id, payload) ou None se o formato for inválido.
+    
+    O payload pode conter um conv_id:
+      MSG_LORAMIND:MSG_ID|CONV_ID:mensagem real
+      MSG_LORAMIND:MSG_ID|mensagem sem conv_id
+    
+    Retorna (msg_id, conv_id, payload) ou None se o formato for inválido.
     """
     if not line.startswith(MSG_PREFIX):
         return None
@@ -266,12 +291,24 @@ def parse_mesh_message(line):
         return None
 
     msg_id = data[:pipe_pos].strip()
-    payload = data[pipe_pos + 1:].strip()
+    raw_payload = data[pipe_pos + 1:].strip()
 
-    if not msg_id or not payload:
+    if not msg_id or not raw_payload:
         return None
 
-    return (msg_id, payload)
+    # Tenta extrair conv_id do payload (formato: CONV_ID:mensagem)
+    colon_pos = raw_payload.find(":")
+    if colon_pos > 0 and colon_pos <= 8:  # conv_id tem no máximo 8 chars
+        potential_conv_id = raw_payload[:colon_pos]
+        # Verifica se parece um conv_id (alfanumérico curto)
+        if potential_conv_id.isalnum() and len(potential_conv_id) <= 8:
+            conv_id = potential_conv_id
+            payload = raw_payload[colon_pos + 1:].strip()
+            if payload:
+                return (msg_id, conv_id, payload)
+    
+    # Sem conv_id — usa 'default'
+    return (msg_id, "default", raw_payload)
 
 
 def build_response_line(msg_id, chunk):
@@ -286,42 +323,49 @@ def build_response_line(msg_id, chunk):
 # HISTÓRICO E OLLAMA
 # ============================================================================
 
-def _build_messages(user_prompt):
+def _build_messages(conv_id, user_prompt):
     """
-    Monta a lista de mensagens para a API /api/chat do Ollama,
-    incluindo o system prompt, o histórico global, e a mensagem atual.
+    Monta a lista de mensagens para a API /api/chat do Ollama:
+      1. System prompt (contexto de emergência)
+      2. One-shot example (ensina o estilo de resposta)
+      3. Histórico da conversa atual
+      4. Mensagem do usuário
     """
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT}
+        {"role": "system", "content": SYSTEM_PROMPT},
+        # One-shot example — ensina o modelo o tom e formato esperado
+        {"role": "user", "content": ONE_SHOT_USER},
+        {"role": "assistant", "content": ONE_SHOT_ASSISTANT},
     ]
 
-    for past_user, past_assistant in conversation_history:
+    # Histórico de conversas anteriores desta conversa
+    history = conversation_histories[conv_id]
+    for past_user, past_assistant in history:
         messages.append({"role": "user", "content": past_user})
         messages.append({"role": "assistant", "content": past_assistant})
 
+    # Mensagem atual
     messages.append({"role": "user", "content": user_prompt})
-
     return messages
 
 
-def query_ollama(prompt):
-    """
-    Envia um prompt para o Ollama usando a API /api/chat com
-    histórico de conversa global. Retorna a resposta completa.
-    """
+def query_ollama(conv_id, prompt):
+    history = conversation_histories[conv_id]
     log_info(f"Enviando para Ollama ({OLLAMA_MODEL}): \"{prompt}\"")
-    log_info(f"Histórico: {len(conversation_history)} trocas anteriores")
-
-    messages = _build_messages(prompt)
+    log_info(f"Conversa: {conv_id} | Histórico: {len(history)} trocas anteriores")
+    messages = _build_messages(conv_id, prompt)
 
     payload = {
         "model": OLLAMA_MODEL,
         "messages": messages,
         "stream": True,
         "options": {
-            "temperature": 0.7,
-            "num_predict": 200,
-            "stop": ["###", "\n\n\n", "Instruction", "**"],
+            "temperature": 0.3,
+            "num_predict": 120,
+            "stop": [
+                "###", "\n\n", "Instruction", "**", "_fonte",
+                "modified Answer", "I've noticed", "User:", "Assistant:"
+            ],
         }
     }
 
@@ -393,7 +437,7 @@ def run_bridge(port_name):
     print(f"  LoraMind Mesh Bridge ATIVO")
     print(f"  Porta: {port_name} | Modelo: {OLLAMA_MODEL}")
     print(f"  Protocolo: MSG_LORAMIND:MSG_ID|payload")
-    print(f"  Histórico: {MAX_HISTORY} trocas (global)")
+    print(f"  Histórico: {MAX_HISTORY} trocas por conversa")
     print(f"  Pressione Ctrl+C para sair")
     print(f"{'='*60}{Colors.RESET}")
     print()
@@ -422,20 +466,21 @@ def run_bridge(port_name):
                 log_info("(ignorado - sem prefixo MSG_LORAMIND: ou formato inválido)")
                 continue
 
-            msg_id, user_message = parsed
+            msg_id, conv_id, user_message = parsed
 
-            log_lora_in(f"Mensagem (ID:{msg_id}): \"{user_message}\"")
+            log_lora_in(f"[Conv:{conv_id}] Mensagem (ID:{msg_id}): \"{user_message}\"")
 
             # Consulta o Ollama
-            ai_response = query_ollama(user_message)
+            ai_response = query_ollama(conv_id, user_message)
 
             if not ai_response:
                 log_warning("Resposta vazia do Ollama, ignorando.")
                 continue
 
-            # Salva no histórico global
-            conversation_history.append((user_message, ai_response))
-            log_info(f"Histórico atualizado: {len(conversation_history)}/{MAX_HISTORY} trocas")
+            # Salva no histórico
+            conversation_histories[conv_id].append((user_message, ai_response))
+            history = conversation_histories[conv_id]
+            log_info(f"Histórico [{conv_id}] atualizado: {len(history)}/{MAX_HISTORY} trocas")
 
             # Divide em chunks
             chunks = _split_into_chunks(ai_response, LORA_CHUNK_SIZE)
@@ -484,21 +529,23 @@ def run_test():
         sys.exit(1)
 
     test_scenarios = [
-        ("x1a2", "Qual é a capital do Brasil?"),
-        ("y3b4", "Qual é a capital da França?"),
-        ("z5c6", "E qual a população dessa última cidade?"),
+        ("x1a2", "conv01", "Qual é a capital do Brasil?"),
+        ("y3b4", "conv02", "Qual é a capital da França?"),
+        ("z5c6", "conv01", "E qual a população dessa cidade?"),  # Deve responder sobre Brasília
+        ("w7d8", "conv02", "E quantos habitantes ela tem?"),      # Deve responder sobre Paris
     ]
 
-    for msg_id, test_message in test_scenarios:
+    for msg_id, conv_id, test_message in test_scenarios:
         print()
-        log_lora_in(f"[simulado ID:{msg_id}]: \"{test_message}\"")
+        log_lora_in(f"[Conv:{conv_id}] (simulado ID:{msg_id}): \"{test_message}\"")
 
-        ai_response = query_ollama(test_message)
+        ai_response = query_ollama(conv_id, test_message)
 
         if ai_response:
-            conversation_history.append((test_message, ai_response))
-            log_ai_out(f"→ ID:{msg_id}: \"{ai_response}\"")
-            log_info(f"Histórico: {len(conversation_history)}/{MAX_HISTORY} trocas")
+            conversation_histories[conv_id].append((test_message, ai_response))
+            log_ai_out(f"→ Conv:{conv_id} ID:{msg_id}: \"{ai_response}\"")
+            history = conversation_histories[conv_id]
+            log_info(f"Histórico [{conv_id}]: {len(history)}/{MAX_HISTORY} trocas")
             print()
             print(f"  Serial que seria enviada:")
             print(f"  {Colors.CYAN}{RESP_PREFIX}{msg_id}|{ai_response}{Colors.RESET}")

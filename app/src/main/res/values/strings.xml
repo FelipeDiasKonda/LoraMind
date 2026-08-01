@@ -12,4 +12,13 @@
     <string name="permission_required">O app precisa de permissões para funcionar</string>
     <string name="empty_chat_title">Nenhuma conversa ainda</string>
     <string name="empty_chat_subtitle">Envie uma mensagem para começar\natravés da rede LoRa</string>
+
+    <!-- Drawer / Multi-conversa -->
+    <string name="drawer_title">Conversas</string>
+    <string name="new_conversation">Nova Conversa</string>
+    <string name="open_drawer">Abrir menu</string>
+    <string name="delete_conversation_title">Deletar conversa?</string>
+    <string name="delete_conversation_message">Esta ação irá apagar todas as mensagens desta conversa. Isso não pode ser desfeito.</string>
+    <string name="delete_confirm">Deletar</string>
+    <string name="delete_cancel">Cancelar</string>
 </resources>

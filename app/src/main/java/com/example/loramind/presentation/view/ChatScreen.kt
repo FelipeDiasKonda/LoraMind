@@ -1,21 +1,22 @@
 package com.example.loramind.presentation.view
 
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.slideInVertically
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -28,42 +29,55 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Bluetooth
+import androidx.compose.material.icons.filled.Chat
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.GraphicEq
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Sensors
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalDrawerSheet
+import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
+import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.loramind.R
+import com.example.loramind.domain.model.Conversation
 import com.example.loramind.presentation.vm.ChatViewModel
-import com.example.loramind.ui.theme.DeepBlack
 import com.example.loramind.ui.theme.DarkSlate
+import com.example.loramind.ui.theme.DeepBlack
 import com.example.loramind.ui.theme.GlassBorder
 import com.example.loramind.ui.theme.GlassDark
 import com.example.loramind.ui.theme.HeaderDark
@@ -71,67 +85,350 @@ import com.example.loramind.ui.theme.LightGray
 import com.example.loramind.ui.theme.MediumGray
 import com.example.loramind.ui.theme.NeonGreen
 import com.example.loramind.ui.theme.SoftSlate
+import kotlinx.coroutines.launch
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 @Composable
 fun ChatScreen(viewModel: ChatViewModel, modifier: Modifier = Modifier) {
     val uiState by viewModel.uiState.collectAsState()
+    val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
+    val scope = rememberCoroutineScope()
 
-    Column(
-        modifier = modifier
-            .fillMaxSize()
-            .background(DeepBlack)
-            .imePadding()
-    ) {
-        // ── Top Bar ──
-        LoraMindTopBar()
-
-        // ── Chat Messages ──
-        LazyColumn(
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp),
-            reverseLayout = true,
-            verticalArrangement = Arrangement.spacedBy(4.dp)
-        ) {
-            // Typing indicator
-            if (uiState.isWaitingForResponse) {
-                item {
-                    TypingIndicator()
-                }
-            }
-
-            // Messages
-            items(uiState.messages.reversed()) { message ->
-                ChatBubble(
-                    text = message.text,
-                    isFromUser = message.isFromUser
-                )
-            }
-
-            // Empty state
-            if (uiState.messages.isEmpty() && !uiState.isWaitingForResponse) {
-                item {
-                    EmptyState()
-                }
-            }
+    // Sincroniza o estado do drawer com o UI state
+    LaunchedEffect(uiState.isDrawerOpen) {
+        if (uiState.isDrawerOpen) {
+            drawerState.open()
+        } else {
+            drawerState.close()
         }
+    }
 
-        // ── Input Area ──
-        ChatInputBar(
-            inputText = uiState.inputText,
-            onInputChanged = { viewModel.onInputTextChanged(it) },
-            onSend = { viewModel.sendMessage() },
-            enabled = uiState.inputText.isNotBlank() && !uiState.isWaitingForResponse
-        )
+    // Sincroniza o fechamento do drawer via gesto com o UI state
+    LaunchedEffect(drawerState.isClosed) {
+        if (drawerState.isClosed && uiState.isDrawerOpen) {
+            viewModel.closeDrawer()
+        }
+    }
+
+    ModalNavigationDrawer(
+        drawerState = drawerState,
+        gesturesEnabled = true,
+        drawerContent = {
+            ConversationDrawer(
+                conversations = uiState.conversations,
+                activeConversation = uiState.activeConversation,
+                onConversationClick = { viewModel.selectConversation(it) },
+                onNewConversation = { viewModel.createConversation() },
+                onDeleteConversation = { viewModel.deleteConversation(it) }
+            )
+        }
+    ) {
+        Column(
+            modifier = modifier
+                .fillMaxSize()
+                .background(DeepBlack)
+                .imePadding()
+        ) {
+            // ── Top Bar ──
+            LoraMindTopBar(
+                onMenuClick = {
+                    scope.launch {
+                        viewModel.toggleDrawer()
+                    }
+                }
+            )
+
+            // ── Chat Messages ──
+            LazyColumn(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp),
+                reverseLayout = true,
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                // Typing indicator
+                if (uiState.isWaitingForResponse) {
+                    item {
+                        TypingIndicator()
+                    }
+                }
+
+                // Messages
+                items(uiState.messages.reversed()) { message ->
+                    ChatBubble(
+                        text = message.text,
+                        isFromUser = message.isFromUser
+                    )
+                }
+
+                // Empty state
+                if (uiState.messages.isEmpty() && !uiState.isWaitingForResponse) {
+                    item {
+                        EmptyState()
+                    }
+                }
+            }
+
+            // ── Input Area ──
+            ChatInputBar(
+                inputText = uiState.inputText,
+                onInputChanged = { viewModel.onInputTextChanged(it) },
+                onSend = { viewModel.sendMessage() },
+                enabled = uiState.inputText.isNotBlank() && !uiState.isWaitingForResponse
+            )
+        }
     }
 }
 
 // ═══════════════════════════════════════════
-// Top Bar — LORA + MIND branding with icons
+// Conversation Drawer — sidebar com lista de conversas
 // ═══════════════════════════════════════════
 @Composable
-private fun LoraMindTopBar() {
+private fun ConversationDrawer(
+    conversations: List<Conversation>,
+    activeConversation: Conversation?,
+    onConversationClick: (Conversation) -> Unit,
+    onNewConversation: () -> Unit,
+    onDeleteConversation: (Conversation) -> Unit
+) {
+    // Dialog de confirmação para deletar
+    var conversationToDelete by remember { mutableStateOf<Conversation?>(null) }
+
+    if (conversationToDelete != null) {
+        AlertDialog(
+            onDismissRequest = { conversationToDelete = null },
+            title = {
+                Text(
+                    text = stringResource(R.string.delete_conversation_title),
+                    color = LightGray
+                )
+            },
+            text = {
+                Text(
+                    text = stringResource(R.string.delete_conversation_message),
+                    color = MediumGray
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    conversationToDelete?.let { onDeleteConversation(it) }
+                    conversationToDelete = null
+                }) {
+                    Text(
+                        text = stringResource(R.string.delete_confirm),
+                        color = Color(0xFFEF4444)
+                    )
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { conversationToDelete = null }) {
+                    Text(
+                        text = stringResource(R.string.delete_cancel),
+                        color = MediumGray
+                    )
+                }
+            },
+            containerColor = DarkSlate,
+            shape = RoundedCornerShape(16.dp)
+        )
+    }
+
+    ModalDrawerSheet(
+        drawerContainerColor = HeaderDark,
+        modifier = Modifier.width(300.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxHeight()
+                .padding(vertical = 16.dp)
+        ) {
+            // ── Header ──
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Chat,
+                    contentDescription = null,
+                    tint = NeonGreen,
+                    modifier = Modifier.size(24.dp)
+                )
+                Spacer(modifier = Modifier.width(12.dp))
+                Text(
+                    text = stringResource(R.string.drawer_title),
+                    color = LightGray,
+                    style = MaterialTheme.typography.titleLarge.copy(
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 1.sp
+                    )
+                )
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // ── Botão Nova Conversa ──
+            Surface(
+                color = NeonGreen.copy(alpha = 0.1f),
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp)
+                    .clickable { onNewConversation() }
+                    .border(
+                        width = 1.dp,
+                        color = NeonGreen.copy(alpha = 0.3f),
+                        shape = RoundedCornerShape(12.dp)
+                    )
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Add,
+                        contentDescription = stringResource(R.string.new_conversation),
+                        tint = NeonGreen,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Text(
+                        text = stringResource(R.string.new_conversation),
+                        color = NeonGreen,
+                        style = MaterialTheme.typography.bodyLarge.copy(
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // ── Linha separadora ──
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp)
+                    .height(1.dp)
+                    .background(GlassBorder)
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // ── Lista de conversas ──
+            LazyColumn(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                items(conversations) { conversation ->
+                    ConversationItem(
+                        conversation = conversation,
+                        isActive = conversation.id == activeConversation?.id,
+                        onClick = { onConversationClick(conversation) },
+                        onLongClick = { conversationToDelete = conversation }
+                    )
+                }
+            }
+        }
+    }
+}
+
+// ═══════════════════════════════════════════
+// Conversation Item — cada conversa no drawer
+// ═══════════════════════════════════════════
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun ConversationItem(
+    conversation: Conversation,
+    isActive: Boolean,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit
+) {
+    val dateFormat = remember { SimpleDateFormat("dd/MM HH:mm", Locale.getDefault()) }
+
+    Surface(
+        color = if (isActive) NeonGreen.copy(alpha = 0.08f) else Color.Transparent,
+        shape = RoundedCornerShape(12.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp)
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = onLongClick
+            )
+            .then(
+                if (isActive) {
+                    Modifier.border(
+                        width = 1.dp,
+                        color = NeonGreen.copy(alpha = 0.4f),
+                        shape = RoundedCornerShape(12.dp)
+                    )
+                } else {
+                    Modifier
+                }
+            )
+    ) {
+        Row(
+            modifier = Modifier
+                .padding(horizontal = 16.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            // Ícone de chat com indicador de ativo
+            Box(
+                modifier = Modifier
+                    .size(36.dp)
+                    .background(
+                        color = if (isActive) NeonGreen.copy(alpha = 0.15f) else GlassDark,
+                        shape = CircleShape
+                    )
+                    .then(
+                        if (isActive) {
+                            Modifier.border(1.dp, NeonGreen.copy(alpha = 0.4f), CircleShape)
+                        } else {
+                            Modifier.border(1.dp, GlassBorder, CircleShape)
+                        }
+                    ),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Chat,
+                    contentDescription = null,
+                    tint = if (isActive) NeonGreen else MediumGray,
+                    modifier = Modifier.size(16.dp)
+                )
+            }
+
+            Spacer(modifier = Modifier.width(12.dp))
+
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = conversation.title,
+                    color = if (isActive) LightGray else MediumGray,
+                    style = MaterialTheme.typography.bodyMedium.copy(
+                        fontWeight = if (isActive) FontWeight.SemiBold else FontWeight.Normal
+                    ),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = dateFormat.format(Date(conversation.updatedAt)),
+                    color = MediumGray.copy(alpha = 0.6f),
+                    style = MaterialTheme.typography.labelSmall
+                )
+            }
+        }
+    }
+}
+
+// ═══════════════════════════════════════════
+// Top Bar — LORA + MIND branding with hamburger menu
+// ═══════════════════════════════════════════
+@Composable
+private fun LoraMindTopBar(onMenuClick: () -> Unit = {}) {
     Surface(
         color = HeaderDark,
         shadowElevation = 8.dp
@@ -139,9 +436,19 @@ private fun LoraMindTopBar() {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 20.dp, vertical = 14.dp),
+                .padding(horizontal = 8.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
+            // Hamburger menu button
+            IconButton(onClick = onMenuClick) {
+                Icon(
+                    imageVector = Icons.Default.Menu,
+                    contentDescription = stringResource(R.string.open_drawer),
+                    tint = LightGray,
+                    modifier = Modifier.size(24.dp)
+                )
+            }
+
             // LORA (white) + MIND (green)
             Text(
                 text = buildAnnotatedString {
@@ -341,7 +648,6 @@ private fun ChatInputBar(
 private fun TypingIndicator() {
     val infiniteTransition = rememberInfiniteTransition(label = "typing")
 
-    // Create 3 dots with staggered animations
     val dot1Alpha by infiniteTransition.animateFloat(
         initialValue = 0.3f, targetValue = 1f,
         animationSpec = infiniteRepeatable(
@@ -385,7 +691,6 @@ private fun TypingIndicator() {
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // 3 animated dots
                 listOf(dot1Alpha, dot2Alpha, dot3Alpha).forEach { alpha ->
                     Box(
                         modifier = Modifier
@@ -410,7 +715,6 @@ private fun EmptyState() {
             .padding(vertical = 80.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        // Radio wave icon
         Icon(
             imageVector = Icons.Default.Sensors,
             contentDescription = null,

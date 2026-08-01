@@ -17,7 +17,17 @@ class MessageRepositoryImpl(
         }
     }
 
+    override fun getMessagesByConversation(conversationId: String): Flow<List<Message>> {
+        return dao.getMessagesByConversation(conversationId).map { entities ->
+            entities.map { it.toDomainModel() }
+        }
+    }
+
     override suspend fun saveMessage(message: Message) {
         dao.insertMessage(message.toEntity())
+    }
+
+    override suspend fun deleteMessagesByConversation(conversationId: String) {
+        dao.deleteMessagesByConversation(conversationId)
     }
 }

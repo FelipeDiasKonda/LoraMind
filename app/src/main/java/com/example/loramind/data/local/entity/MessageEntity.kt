@@ -7,18 +7,19 @@ import com.example.loramind.domain.model.Message
 // O @Entity avisa ao Room que esta classe deve ser transformada em uma tabela do SQLite
 @Entity(tableName = "messages")
 data class MessageEntity(
-    @PrimaryKey val id: String, // O ID único que geramos (UUID) será a chave primária
+    @PrimaryKey val id: String,
     val text: String,
     val isFromUser: Boolean,
-    val timestamp: Long
+    val timestamp: Long,
+    val conversationId: String
 ) {
-    // Função auxiliar para converter a "Entidade do Banco" para o "Modelo de Domínio" puro
     fun toDomainModel(): Message {
         return Message(
             id = id,
             text = text,
             isFromUser = isFromUser,
-            timestamp = timestamp
+            timestamp = timestamp,
+            conversationId = conversationId
         )
     }
 }
@@ -28,6 +29,7 @@ fun Message.toEntity(): MessageEntity {
         id = id,
         text = text,
         isFromUser = isFromUser,
-        timestamp = timestamp
+        timestamp = timestamp,
+        conversationId = conversationId
     )
 }

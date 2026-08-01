@@ -19,6 +19,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.loramind.data.local.AppDatabase
 import com.example.loramind.data.repository.BluetoothRepositoryImpl
+import com.example.loramind.data.repository.ConversationRepositoryImpl
 import com.example.loramind.data.repository.MessageRepositoryImpl
 import com.example.loramind.domain.usecase.SendMessageUseCase
 import com.example.loramind.presentation.view.ChatScreen
@@ -68,7 +69,10 @@ class MainActivity : ComponentActivity() {
                     
                     val database = AppDatabase.getDatabase(applicationContext)
                     val messageDao = database.messageDao()
+                    val conversationDao = database.conversationDao()
+
                     val localRepository = MessageRepositoryImpl(messageDao)
+                    val conversationRepository = ConversationRepositoryImpl(conversationDao)
 
                     val bluetoothRepository = BluetoothRepositoryImpl(applicationContext)
 
@@ -76,7 +80,13 @@ class MainActivity : ComponentActivity() {
 
                     val factory = object : ViewModelProvider.Factory {
                         override fun <T : ViewModel> create(modelClass: Class<T>): T {
-                            return ChatViewModel(useCase, localRepository, bluetoothRepository) as T
+                            @Suppress("UNCHECKED_CAST")
+                            return ChatViewModel(
+                                useCase,
+                                localRepository,
+                                bluetoothRepository,
+                                conversationRepository
+                            ) as T
                         }
                     }
 
