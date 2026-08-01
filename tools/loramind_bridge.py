@@ -38,28 +38,23 @@ import serial.tools.list_ports
 
 BAUD_RATE = 115200
 OLLAMA_URL = "http://localhost:11434/api/chat"
-OLLAMA_MODEL = "phi3"
+OLLAMA_MODEL = "qwen2.5:3b"
 MSG_PREFIX = "MSG_LORAMIND:"
 RESP_PREFIX = "RESP_AI:"
 
 # Número máximo de trocas (user+assistant) a manter no histórico
 MAX_HISTORY = 5
 
-# Prompt de sistema — adaptativo de idioma, conciso, texto corrido sem tópicos
+# Prompt de sistema para o modelo — direto, conciso, foco offline
 SYSTEM_PROMPT = (
-    "Você é o LoraMind, um assistente de emergência que opera offline via rádio LoRa. "
-    "Responda SEMPRE no mesmo idioma em que o usuário perguntar. "
-    "NUNCA fale para o usuario ligar para alguem ou pesquisar algo na internet. "
-    "Seja direto, prático e muito conciso (máximo 2 a 3 frases curtas em texto corrido). "
-    "NÃO use tópicos, listas numeradas, markdown ou formatação especial. "
-    "NÃO faça comentários sobre as regras, não critique o prompt e não explique seu raciocínio. "
-    "Nunca responda em inglês se o usuário falar em português."
-)
-
-# One-shot example — texto corrido, natural, curto e no mesmo idioma
-ONE_SHOT_USER = "Meu carro quebrou numa rodovia deserta à noite e não tenho sinal."
-ONE_SHOT_ASSISTANT = (
-    "Ligue o pisca-alerta, posicione o triângulo a 30 metros atrás do veículo e permaneça dentro do carro com as portas travadas. Ao amanhecer, caminhe pelo acostamento com segurança até o ponto habitado mais próximo."
+    "Você é o LoraMind, um assistente de IA para emergências e suporte que opera 100% offline via rádio LoRa. "
+    "O usuário está SEM internet e SEM sinal de celular.\n"
+    "Diretrizes:\n"
+    "- Responda SEMPRE no mesmo idioma em que o usuário perguntar.\n"
+    "- Seja direto, prático e conciso (máximo 2 a 3 frases em texto corrido).\n"
+    "- NUNCA sugira ligar para emergência, usar telefone ou acessar a internet (não há conectividade).\n"
+    "- Priorize ações práticas e seguras que o usuário pode tomar sozinho no local.\n"
+    "- Não use tópicos, numeração, listas ou formatação especial. Apenas texto puro e direto."
 )
 
 # Tamanho máximo de cada chunk LoRa (reduzido para acomodar header mesh ~13 bytes)
@@ -306,6 +301,8 @@ def parse_mesh_message(line):
             payload = raw_payload[colon_pos + 1:].strip()
             if payload:
                 return (msg_id, conv_id, payload)
+            else:
+                return None  # Payload vazio, ignora
     
     # Sem conv_id — usa 'default'
     return (msg_id, "default", raw_payload)
@@ -326,16 +323,12 @@ def build_response_line(msg_id, chunk):
 def _build_messages(conv_id, user_prompt):
     """
     Monta a lista de mensagens para a API /api/chat do Ollama:
-      1. System prompt (contexto de emergência)
-      2. One-shot example (ensina o estilo de resposta)
-      3. Histórico da conversa atual
-      4. Mensagem do usuário
+      1. System prompt (contexto de emergência/offline)
+      2. Histórico da conversa atual
+      3. Mensagem do usuário
     """
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        # One-shot example — ensina o modelo o tom e formato esperado
-        {"role": "user", "content": ONE_SHOT_USER},
-        {"role": "assistant", "content": ONE_SHOT_ASSISTANT},
+        {"role": "system", "content": SYSTEM_PROMPT}
     ]
 
     # Histórico de conversas anteriores desta conversa
@@ -360,8 +353,8 @@ def query_ollama(conv_id, prompt):
         "messages": messages,
         "stream": True,
         "options": {
-            "temperature": 0.3,
-            "num_predict": 120,
+            "temperature": 0.6,
+            "num_predict": 150,
             "stop": [
                 "###", "\n\n", "Instruction", "**", "_fonte",
                 "modified Answer", "I've noticed", "User:", "Assistant:"
