@@ -1,5 +1,12 @@
 /*
- * LoraMind — ESP32 Base Station (Mesh Gateway)
+ * LoraMind — ESP32-S3 Base Station (Heltec WiFi LoRa 32 V3)
+ * 
+ * Hardware: Heltec WiFi LoRa 32 V3 (ESP32-S3 + SX1262)
+ * Biblioteca LoRa: RadioLib (compatível com SX1262)
+ * 
+ * IMPORTANTE: Os parâmetros LoRa DEVEM ser idênticos aos do ESP1 (SX1276)
+ *   para que os dois chips consigam se comunicar.
+ *   - 915 MHz, BW 125kHz, SF7, CR 4/5, SyncWord 0x12
  * 
  * Protocolo Mesh (sem IDs de nó — roteamento por MSG_ID):
  *   Pacote LoRa: LM|TIPO|MSG_ID|TTL|payload
@@ -13,13 +20,14 @@
  * A Base Station é o único nó que PROCESSA perguntas (Q).
  * Respostas (R) são enviadas de volta para a mesh com o mesmo MSG_ID.
  * 
- * Hardware:
- *   - ESP32 com módulo LoRa SX1276 (915MHz)
- *   - Conectado ao PC via cabo USB
+ * Dependências:
+ *   - RadioLib (instalar via Library Manager do Arduino IDE)
+ *   - Board: "Heltec WiFi LoRa 32(V3)" no Board Manager
  */
 
 #include <SPI.h>
-#include <LoRa.h>
+#include <RadioLib.h>
+#include "mesh_protocol.h"
 
 // ============================================================================
 // CONFIGURAÇÃO
@@ -27,14 +35,15 @@
 #define DEFAULT_TTL 3          // TTL padrão para respostas enviadas
 
 // ============================================================================
-// PINOS
+// PINOS — Heltec WiFi LoRa 32 V3 (ESP32-S3 + SX1262)
 // ============================================================================
-#define SCK  5
-#define MISO 19
-#define MOSI 27
-#define SS   18
-#define RST  14
-#define DIO0 26
+#define LORA_NSS    8          // Chip Select (NSS/CS)
+#define LORA_DIO1   14         // Interrupção de recepção (substitui DIO0 do SX1276)
+#define LORA_RST    12         // Reset do módulo LoRa
+#define LORA_BUSY   13         // Pino BUSY do SX1262 (não existe no SX1276)
+#define LORA_SCK    9          // SPI Clock
+#define LORA_MISO   11         // SPI MISO
+#define LORA_MOSI   10         // SPI MOSI
 
 // ============================================================================
 // PROTOCOLO
@@ -44,6 +53,26 @@
 
 const String MSG_PREFIX  = "MSG_LORAMIND:";
 const String RESP_PREFIX = "RESP_AI:";
+
+// ============================================================================
+// LORA — RadioLib SX1262
+// ============================================================================
+SPIClass loraSPI(FSPI);
+SX1262 radio = new Module(LORA_NSS, LORA_DIO1, LORA_RST, LORA_BUSY, loraSPI);
+
+// Flag de interrupção — setada quando um pacote LoRa chega
+volatile bool rxFlag = false;
+
+#if defined(ESP32)
+  // ISR no ESP32 precisa do atributo IRAM_ATTR
+  void IRAM_ATTR rxDone(void) {
+    rxFlag = true;
+  }
+#else
+  void rxDone(void) {
+    rxFlag = true;
+  }
+#endif
 
 // ============================================================================
 // CACHE DE DUPLICATAS (para Q packets)
@@ -57,16 +86,7 @@ int seenIndex = 0;
 // ============================================================================
 String serialBuffer = "";
 
-// ============================================================================
-// ESTRUTURA DO PACOTE PARSED
-// ============================================================================
-struct MeshPacket {
-  bool valid;
-  char type;        // 'Q' ou 'R'
-  String msgId;     // ID da mensagem
-  int ttl;          // Hops restantes
-  String payload;   // Conteúdo
-};
+// MeshPacket definido em mesh_protocol.h
 
 // ============================================================================
 // FUNÇÕES DE PROTOCOLO
@@ -165,22 +185,85 @@ bool parseSerialResponse(String data, String &msgId, String &payload) {
 
 void setup() {
   Serial.begin(115200);
+  delay(1500);  // Aguarda serial e hardware estabilizarem
+
   Serial.println("[BS] ============================");
-  Serial.println("[BS] LoraMind Base Station - INICIO");
+  Serial.println("[BS] LoraMind Base Station V3.2");
+  Serial.println("[BS] HW: Heltec V3.2 (ESP32-S3 + SX1262)");
   Serial.println("[BS] Modo: MESH GATEWAY");
   Serial.println("[BS] LoRa<->Serial (bidirecional)");
   Serial.println("[BS] ============================");
 
-  // Inicializa LoRa
-  SPI.begin(SCK, MISO, MOSI, SS);
-  LoRa.setPins(SS, RST, DIO0);
+  // HELTEC V3.2: Ativa Vext para alimentar periféricos LoRa/OLED
+  // V3.2 usa LDO para Vext — LOW = ON na maioria dos V3.x
+  // Se não funcionar, troque para HIGH (lógica invertida em alguns V3.2)
+  pinMode(36, OUTPUT);
+  digitalWrite(36, LOW);
+  delay(100);  // Aguarda Vext estabilizar
+  Serial.println("[BS] Vext habilitado (GPIO 36 = LOW)");
 
-  if (!LoRa.begin(915E6)) {
-    Serial.println("[BS] ERRO: LoRa nao inicializou!");
-    while (1);
+  // Inicializa SPI com os pinos do Heltec V3
+  loraSPI.begin(LORA_SCK, LORA_MISO, LORA_MOSI, LORA_NSS);
+  Serial.println("[BS] SPI inicializado");
+
+  // Inicializa SX1262 com parâmetros compatíveis com o SX1276 dos nós ESP1
+  // Parâmetros: freq, BW, SF, CR, syncWord, power, preamble, tcxoVoltage, useLDO
+  Serial.print("[BS] Inicializando SX1262... ");
+
+  int state = radio.begin(
+    915.0,    // Frequência: 915 MHz (deve bater com ESP1)
+    250.0,    // Bandwidth: 250 kHz (absorve desvio de cristal com folga e reduz tempo no ar)
+    7,        // Spreading Factor: 7
+    5,        // Coding Rate: 4/5
+    0x12,     // Sync Word: 0x12 (RadioLib trata compatibilidade)
+    10,       // Potência TX: 10 dBm
+    8,        // Preamble: 8 símbolos
+    1.6,      // TCXO Voltage: 1.6V (Heltec V3.2 — se não funcionar, tente 1.7 ou 1.8)
+    false     // Regulador: DC-DC (Heltec V3 usa DC-DC, não LDO)
+  );
+
+  if (state != RADIOLIB_ERR_NONE) {
+    Serial.print("FALHOU! Código de erro: ");
+    Serial.println(state);
+    Serial.println("[BS] Verifique:");
+    Serial.println("[BS]   1. Placa selecionada correta no Arduino IDE?");
+    Serial.println("[BS]   2. Módulo LoRa conectado?");
+    Serial.println("[BS]   3. Pinos corretos para seu modelo?");
+
+    // Loop com delay para não disparar watchdog
+    while (true) {
+      delay(10000);
+    }
   }
 
-  Serial.println("[BS] LoRa 915MHz OK");
+  Serial.println("OK!");
+
+  // CRÍTICO: No Heltec V3, o SX1262 usa DIO2 para controlar o switch de antena (TX/RX).
+  // Sem isso, a antena não é ativada e o rádio não recebe nem transmite.
+  radio.setDio2AsRfSwitch(true);
+  Serial.println("[BS] DIO2 configurado como RF Switch");
+
+  // Habilita CRC 16-bit (2 bytes) — compatível com SX1276
+  radio.setCRC(2);
+  Serial.println("[BS] CRC: habilitado (2 bytes)");
+
+  // Desativa Low Data Rate Optimize (LDRO) para compatibilidade perfeita em SF7/125kHz
+  radio.forceLDRO(false);
+
+  // Garante polaridade padrão de IQ (não invertido)
+  radio.invertIQ(false);
+
+  // Configura interrupção DIO1 para recepção não-bloqueante
+  radio.setDio1Action(rxDone);
+
+  // Inicia modo recepção contínua
+  state = radio.startReceive();
+  if (state != RADIOLIB_ERR_NONE) {
+    Serial.print("[BS] ERRO ao iniciar recepção! Código: ");
+    Serial.println(state);
+  }
+
+  Serial.println("[BS] LoRa 915MHz OK (SX1262 — compativel com SX1276)");
   Serial.println("[BS] Pronto! Aguardando dados...");
 }
 
@@ -191,65 +274,97 @@ void setup() {
 void loop() {
 
   // =====================================================================
+  // HEARTBEAT — confirma que o loop está rodando
+  // =====================================================================
+  static unsigned long lastHeartbeat = 0;
+  if (millis() - lastHeartbeat > 5000) {
+    lastHeartbeat = millis();
+    Serial.print("[BS] Heartbeat | DIO1=");
+    Serial.print(digitalRead(LORA_DIO1));
+    Serial.print(" | rxFlag=");
+    Serial.println(rxFlag ? "true" : "false");
+  }
+
+  // =====================================================================
   // CAMINHO DE IDA: LoRa -> Serial USB (pergunta da mesh para o Python)
   // =====================================================================
-  int packetSize = LoRa.parsePacket();
-  if (packetSize) {
-    String recebido = "";
-    while (LoRa.available()) {
-      recebido += (char)LoRa.read();
-    }
-    recebido.trim();
+  // Backup: polling no pino DIO1 caso a interrupção não funcione
+  if (digitalRead(LORA_DIO1) == HIGH && !rxFlag) {
+    Serial.println("[BS] DIO1 HIGH detectado por polling (interrupção falhou!)");
+    rxFlag = true;
+  }
 
-    int rssi = LoRa.packetRssi();
-    float snr = LoRa.packetSnr();
+  if (rxFlag) {
+    // Limpa a flag ANTES de processar (para não perder interrupções)
+    rxFlag = false;
 
-    Serial.print("[BS] LoRa raw (RSSI:");
-    Serial.print(rssi);
-    Serial.print(" SNR:");
-    Serial.print(snr);
-    Serial.print("): \"");
-    Serial.print(recebido);
-    Serial.println("\"");
+    String recebido;
+    int state = radio.readData(recebido);
 
-    // Parse do header mesh
-    MeshPacket pkt = parsePacket(recebido);
+    if (state == RADIOLIB_ERR_NONE || state == RADIOLIB_ERR_CRC_MISMATCH) {
+      recebido.trim();
 
-    if (!pkt.valid) {
-      Serial.println("[BS] DESCARTADO (header invalido)");
-      return;
-    }
+      float rssi = radio.getRSSI();
+      float snr  = radio.getSNR();
+      float fErr = radio.getFrequencyError();
 
-    Serial.print("[BS] Parsed: TIPO=");
-    Serial.print(pkt.type);
-    Serial.print(" ID=");
-    Serial.print(pkt.msgId);
-    Serial.print(" TTL=");
-    Serial.println(pkt.ttl);
-
-    if (pkt.type == 'Q') {
-      // Verificar duplicata
-      if (isDuplicate(pkt.msgId)) {
-        Serial.println("[BS] Q DESCARTADO (duplicata: " + pkt.msgId + ")");
-        return;
+      Serial.print("[BS] LoRa raw (RSSI:");
+      Serial.print(rssi, 1);
+      Serial.print(" SNR:");
+      Serial.print(snr, 1);
+      Serial.print(" FErr:");
+      Serial.print(fErr / 1000.0, 1);
+      Serial.print("kHz");
+      if (state == RADIOLIB_ERR_CRC_MISMATCH) {
+        Serial.print(" CRC-warn");
       }
-
-      // Pergunta para processar — enviar para Python
-      // Formato: MSG_LORAMIND:MSG_ID|payload
-      Serial.print(MSG_PREFIX);
-      Serial.print(pkt.msgId);
-      Serial.print("|");
-      Serial.println(pkt.payload);
-
-      Serial.print("[BS] -> Python: [");
-      Serial.print(pkt.msgId);
-      Serial.print("] \"");
-      Serial.print(pkt.payload);
+      Serial.print("): \"");
+      Serial.print(recebido);
       Serial.println("\"");
+
+      // Parse do header mesh
+      MeshPacket pkt = parsePacket(recebido);
+
+      if (!pkt.valid) {
+        Serial.println("[BS] DESCARTADO (header invalido ou corrompido)");
+      } else {
+        Serial.print("[BS] Parsed: TIPO=");
+        Serial.print(pkt.type);
+        Serial.print(" ID=");
+        Serial.print(pkt.msgId);
+        Serial.print(" TTL=");
+        Serial.println(pkt.ttl);
+
+        if (pkt.type == 'Q') {
+          // Verificar duplicata
+          if (isDuplicate(pkt.msgId)) {
+            Serial.println("[BS] Q DESCARTADO (duplicata: " + pkt.msgId + ")");
+          } else {
+            // Pergunta para processar — enviar para Python
+            // Formato: MSG_LORAMIND:MSG_ID|payload
+            Serial.print(MSG_PREFIX);
+            Serial.print(pkt.msgId);
+            Serial.print("|");
+            Serial.println(pkt.payload);
+
+            Serial.print("[BS] -> Python: [");
+            Serial.print(pkt.msgId);
+            Serial.print("] \"");
+            Serial.print(pkt.payload);
+            Serial.println("\"");
+          }
+        } else {
+          // Tipo R na BS? Não deveria acontecer, mas ignora
+          Serial.println("[BS] R recebido na BS — ignorando (inesperado)");
+        }
+      }
     } else {
-      // Tipo R na BS? Não deveria acontecer em topologia normal, mas relay se preciso
-      Serial.println("[BS] R recebido na BS — ignorando (inesperado)");
+      Serial.print("[BS] Erro na recepção! Código: ");
+      Serial.println(state);
     }
+
+    // Volta para modo recepção (obrigatório após readData)
+    radio.startReceive();
   }
 
   // =====================================================================
@@ -274,18 +389,24 @@ void loop() {
           Serial.print(payload);
           Serial.println("\"");
 
-          // Monta pacote mesh de resposta e envia via LoRa
+          // Monta pacote mesh de resposta
           String packet = buildPacket('R', msgId, DEFAULT_TTL, payload);
 
-          LoRa.beginPacket();
-          LoRa.print(packet);
-          LoRa.endPacket();
+          // Para recepção, transmite, e volta a receber
+          radio.standby();
+          int state = radio.transmit(packet);
 
-          Serial.print("[BS] LoRa enviado: \"");
-          Serial.print(packet);
-          Serial.println("\"");
+          if (state == RADIOLIB_ERR_NONE) {
+            Serial.print("[BS] LoRa enviado: \"");
+            Serial.print(packet);
+            Serial.println("\"");
+          } else {
+            Serial.print("[BS] ERRO ao transmitir! Código: ");
+            Serial.println(state);
+          }
 
-          LoRa.receive();
+          // Volta para modo recepção
+          radio.startReceive();
         } else {
           Serial.println("[BS] ERRO: formato invalido: \"" + data + "\"");
         }

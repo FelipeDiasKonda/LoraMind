@@ -21,16 +21,18 @@
  *   - ESP32 com módulo LoRa SX1276 (915MHz)
  *   - Display OLED SSD1306 128x64
  *   - Bluetooth Clássico (SPP/RFCOMM)
+ *   - Biblioteca LoRa: RadioLib (100% interoperável com Heltec V3 SX1262)
  * 
  * Mesmo firmware para todos os nós clientes — sem nada hardcoded.
  */
 
 #include <SPI.h>
-#include <LoRa.h>
+#include <RadioLib.h>
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include "BluetoothSerial.h"
+#include "mesh_protocol.h"
 
 // ============================================================================
 // CONFIGURAÇÃO
@@ -40,7 +42,7 @@
 #define RELAY_DELAY_MS 100     // Delay antes de retransmitir (evita colisão)
 
 // ============================================================================
-// PINOS
+// PINOS (ESP32 TTGO / Heltec V2 / SX1276 clássico)
 // ============================================================================
 #define OLED_RST 16
 #define SCK      5
@@ -57,8 +59,26 @@
 #define PACKET_PREFIX    "LM"
 
 // ============================================================================
+// OBJETOS GLOBAIS
+// ============================================================================
+Adafruit_SSD1306 display(128, 64, &Wire, OLED_RST);
+BluetoothSerial SerialBT;
+
+// Módulo SX1276 via RadioLib
+SX1276 radio = new Module(SS, DIO0, RST, RADIOLIB_NC);
+
+// Flag de interrupção de recepção LoRa
+volatile bool rxFlag = false;
+
+#if defined(ESP8266) || defined(ESP32)
+  ICACHE_RAM_ATTR
+#endif
+void rxDone(void) {
+  rxFlag = true;
+}
+
+// ============================================================================
 // LISTA DE PERGUNTAS PENDENTES (MSG_IDs que EU enviei)
-// Se uma resposta chegar com um desses IDs, é para mim.
 // ============================================================================
 #define PENDING_SIZE 10
 String pendingMsgIds[PENDING_SIZE];
@@ -70,6 +90,13 @@ int pendingIndex = 0;
 #define SEEN_CACHE_SIZE 20
 String seenCache[SEEN_CACHE_SIZE];
 int seenIndex = 0;
+
+// ============================================================================
+// CACHE DE DUPLICATAS (para R packets — evita entrega/relay duplicado)
+// ============================================================================
+#define SEEN_R_CACHE_SIZE 20
+String seenRCache[SEEN_R_CACHE_SIZE];
+int seenRIndex = 0;
 
 // ============================================================================
 // CONTADORES (para display)
@@ -84,30 +111,9 @@ unsigned long msgsRelayed = 0;
 String btName = "LoraMind";
 
 // ============================================================================
-// OBJETOS GLOBAIS
-// ============================================================================
-Adafruit_SSD1306 display(128, 64, &Wire, OLED_RST);
-BluetoothSerial SerialBT;
-
-// ============================================================================
-// ESTRUTURA DO PACOTE PARSED
-// ============================================================================
-struct MeshPacket {
-  bool valid;
-  char type;        // 'Q' ou 'R'
-  String msgId;     // ID da mensagem (ex: "a7f3")
-  int ttl;          // Hops restantes
-  String payload;   // Conteúdo da mensagem
-};
-
-// ============================================================================
 // FUNÇÕES DE PROTOCOLO
 // ============================================================================
 
-/**
- * Gera um MSG_ID aleatório de MSG_ID_LEN caracteres alfanuméricos.
- * 4 chars = 36^4 = ~1.7 milhão de combinações.
- */
 String generateMsgId() {
   const char chars[] = "abcdefghijklmnopqrstuvwxyz0123456789";
   String id = "";
@@ -117,9 +123,6 @@ String generateMsgId() {
   return id;
 }
 
-/**
- * Gera um sufixo hex aleatório de 4 chars para o nome Bluetooth.
- */
 String generateBtSuffix() {
   const char hex[] = "0123456789ABCDEF";
   String suffix = "";
@@ -129,10 +132,6 @@ String generateBtSuffix() {
   return suffix;
 }
 
-/**
- * Monta um pacote LoRa com header mesh.
- * Formato: LM|TIPO|MSG_ID|TTL|payload
- */
 String buildPacket(char type, String msgId, int ttl, String payload) {
   String pkt = PACKET_PREFIX;
   pkt += PACKET_DELIMITER;
@@ -146,18 +145,12 @@ String buildPacket(char type, String msgId, int ttl, String payload) {
   return pkt;
 }
 
-/**
- * Faz parse de um pacote LoRa recebido.
- * Formato esperado: LM|TIPO|MSG_ID|TTL|payload (4 delimitadores)
- */
 MeshPacket parsePacket(String raw) {
   MeshPacket pkt;
   pkt.valid = false;
 
-  // Precisa ter pelo menos "LM|Q|abcd|0|x" = 13 chars
   if (raw.length() < 13) return pkt;
 
-  // Encontra os 4 delimitadores
   int delimiters[4];
   int count = 0;
   for (int i = 0; i < (int)raw.length() && count < 4; i++) {
@@ -166,84 +159,76 @@ MeshPacket parsePacket(String raw) {
     }
   }
 
-  if (count < 4) return pkt;  // Formato inválido
+  if (count < 4) return pkt;
 
-  // Campo 0: prefixo "LM"
-  String prefix = raw.substring(0, delimiters[0]);
-  if (prefix != PACKET_PREFIX) return pkt;
+  if (raw.substring(0, delimiters[0]) != PACKET_PREFIX) return pkt;
 
-  // Campo 1: tipo (Q ou R)
   String typeStr = raw.substring(delimiters[0] + 1, delimiters[1]);
   if (typeStr.length() != 1) return pkt;
-  pkt.type = typeStr.charAt(0);
-  if (pkt.type != 'Q' && pkt.type != 'R') return pkt;
+  char t = typeStr.charAt(0);
+  if (t != 'Q' && t != 'R') return pkt;
+  pkt.type = t;
 
-  // Campo 2: MSG_ID
   pkt.msgId = raw.substring(delimiters[1] + 1, delimiters[2]);
-  if (pkt.msgId.length() < 2) return pkt;  // MSG_ID muito curto
+  if (pkt.msgId.length() == 0) return pkt;
 
-  // Campo 3: TTL
   String ttlStr = raw.substring(delimiters[2] + 1, delimiters[3]);
   pkt.ttl = ttlStr.toInt();
+  if (pkt.ttl < 0 || pkt.ttl > 9) return pkt;
 
-  // Campo 4: payload (tudo após o último delimitador)
   pkt.payload = raw.substring(delimiters[3] + 1);
-  pkt.payload.trim();
+  if (pkt.payload.length() == 0) return pkt;
 
   pkt.valid = true;
   return pkt;
 }
 
 // ============================================================================
-// PERGUNTAS PENDENTES
+// GERENCIAMENTO DE ESTADO
 // ============================================================================
 
-/**
- * Adiciona um MSG_ID à lista de perguntas pendentes.
- */
 void addPending(String msgId) {
   pendingMsgIds[pendingIndex] = msgId;
   pendingIndex = (pendingIndex + 1) % PENDING_SIZE;
+  Serial.print("[NODE] Adicionado pendente: ");
+  Serial.println(msgId);
 }
 
-/**
- * Verifica se um MSG_ID está na lista de perguntas pendentes.
- * NÃO remove o ID (para suportar respostas multi-chunk com mesmo MSG_ID).
- */
 bool isPending(String msgId) {
   for (int i = 0; i < PENDING_SIZE; i++) {
     if (pendingMsgIds[i] == msgId) {
+      pendingMsgIds[i] = "";
       return true;
     }
   }
   return false;
 }
 
-// ============================================================================
-// CACHE DE DUPLICATAS (só para pacotes Q)
-// ============================================================================
-
-/**
- * Verifica se um pacote Q com esse MSG_ID já foi visto.
- * Se não, adiciona ao cache e retorna false.
- * Se sim, retorna true (é duplicata).
- */
 bool isDuplicate(String msgId) {
-  // Procura no cache
   for (int i = 0; i < SEEN_CACHE_SIZE; i++) {
     if (seenCache[i] == msgId) {
       return true;
     }
   }
-
-  // Não visto — adiciona ao cache circular
   seenCache[seenIndex] = msgId;
   seenIndex = (seenIndex + 1) % SEEN_CACHE_SIZE;
   return false;
 }
 
+bool isResponseDuplicate(String msgId, String payload) {
+  String key = msgId + "|" + payload;
+  for (int i = 0; i < SEEN_R_CACHE_SIZE; i++) {
+    if (seenRCache[i] == key) {
+      return true;
+    }
+  }
+  seenRCache[seenRIndex] = key;
+  seenRIndex = (seenRIndex + 1) % SEEN_R_CACHE_SIZE;
+  return false;
+}
+
 // ============================================================================
-// FUNÇÕES AUXILIARES - DISPLAY OLED
+// DISPLAY OLED
 // ============================================================================
 
 void displayInit() {
@@ -253,36 +238,44 @@ void displayInit() {
   digitalWrite(OLED_RST, HIGH);
 
   Wire.begin(4, 15);
-  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
-    Serial.println("[NODE] ERRO: Display OLED nao encontrado!");
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C, false, false)) {
+    Serial.println("[NODE] Display OLED nao encontrado!");
+    return;
   }
 
   display.clearDisplay();
-  display.setTextSize(1);
   display.setTextColor(WHITE);
+  display.setTextSize(1);
   display.setCursor(0, 0);
-  display.println("LoraMind Mesh");
-  display.println(btName);
-  display.println("Aguardando...");
+  display.println("LoraMind Mesh Node");
+  display.println("Iniciando...");
   display.display();
 }
 
 void displayStatus(String line1, String line2, String line3) {
   display.clearDisplay();
   display.setTextSize(1);
-  display.setTextColor(WHITE);
 
   display.setCursor(0, 0);
-  display.println("= " + btName + " =");
-  
-  display.setCursor(0, 16);
+  display.print("MESH:");
+  display.println(btName);
+
+  display.setCursor(0, 14);
   display.println(line1);
-  
-  display.setCursor(0, 32);
+
+  display.setCursor(0, 26);
   display.println(line2);
-  
-  display.setCursor(0, 48);
+
+  display.setCursor(0, 38);
   display.println(line3);
+
+  display.setCursor(0, 52);
+  display.print("TX:");
+  display.print(msgsSent);
+  display.print(" RX:");
+  display.print(msgsReceived);
+  display.print(" RL:");
+  display.print(msgsRelayed);
 
   display.display();
 }
@@ -293,39 +286,65 @@ void displayStatus(String line1, String line2, String line3) {
 
 void setup() {
   Serial.begin(115200);
-  
-  // Seed para geração de IDs aleatórios
-  randomSeed(analogRead(0) ^ (micros() << 16) ^ (millis() << 8));
+  delay(1000);
 
-  // Gera nome Bluetooth único: "LoraMind_XXXX"
+  randomSeed(analogRead(0) ^ (micros() << 16) ^ (millis() << 8));
   btName = "LoraMind_" + generateBtSuffix();
 
   Serial.println("[NODE] ============================");
-  Serial.println("[NODE] LoraMind Mesh Node - INICIO");
+  Serial.println("[NODE] LoraMind Mesh Node (RadioLib)");
+  Serial.println("[NODE] HW: ESP32 + SX1276");
   Serial.println("[NODE] Modo: MESH (BT + LoRa + Relay)");
   Serial.print("[NODE] Bluetooth: ");
   Serial.println(btName);
   Serial.println("[NODE] ============================");
 
-  // Inicializa Display OLED
   displayInit();
   Serial.println("[NODE] Display OLED OK");
 
-  // Inicializa Bluetooth com nome único
   SerialBT.begin(btName);
   Serial.println("[NODE] Bluetooth OK");
 
-  // Inicializa LoRa
+  // Inicializa barramento SPI com os pinos corretos do hardware SX1276
   SPI.begin(SCK, MISO, MOSI, SS);
-  LoRa.setPins(SS, RST, DIO0);
+  Serial.println("[NODE] SPI inicializado (SCK:5, MISO:19, MOSI:27, SS:18)");
 
-  if (!LoRa.begin(915E6)) {
-    Serial.println("[NODE] ERRO: LoRa nao inicializou!");
-    displayStatus("ERRO", "LoRa falhou", "Reinicie");
-    while (1);
+  // Inicializa LoRa via RadioLib com parâmetros 100% idênticos à Base Station
+  Serial.print("[NODE] Inicializando SX1276... ");
+  int state = radio.begin(
+    915.0,    // Frequência: 915 MHz
+    250.0,    // Bandwidth: 250 kHz (absorve desvio de cristal com folga e reduz tempo no ar)
+    7,        // Spreading Factor: 7
+    5,        // Coding Rate: 4/5
+    0x12,     // Sync Word: 0x12
+    10,       // Potência TX: 10 dBm
+    8         // Preamble: 8 símbolos
+  );
+
+  if (state != RADIOLIB_ERR_NONE) {
+    Serial.print("FALHOU! Código: ");
+    Serial.println(state);
+    displayStatus("ERRO", "LoRa falhou", "Código: " + String(state));
+    while (1) { delay(1000); }
   }
 
-  Serial.println("[NODE] LoRa 915MHz OK");
+  // Habilita CRC 16-bit (2 bytes)
+  radio.setCRC(2);
+  Serial.println("[NODE] CRC: habilitado (2 bytes)");
+
+  // Desativa Low Data Rate Optimize (LDRO) para compatibilidade perfeita em SF7/125kHz
+  radio.forceLDRO(false);
+
+  // Garante polaridade padrão de IQ (não invertido)
+  radio.invertIQ(false);
+
+  // Configura interrupção DIO0 para recepção não-bloqueante
+  radio.setDio0Action(rxDone, RISING);
+
+  // Inicia modo recepção contínua
+  radio.startReceive();
+
+  Serial.println("[NODE] LoRa 915MHz OK (RadioLib)");
   Serial.println("[NODE] Mesh pronto!");
 
   displayStatus("Status: OK", "BT: " + btName, "LoRa: 915MHz");
@@ -349,20 +368,18 @@ void loop() {
       Serial.print(msg);
       Serial.println("\"");
 
-      // Gera MSG_ID e empacota
       String msgId = generateMsgId();
       String packet = buildPacket('Q', msgId, DEFAULT_TTL, msg);
 
-      // Registra como pergunta pendente (para reconhecer a resposta)
       addPending(msgId);
-
-      // Também marca como "visto" no cache de duplicatas (evita eco)
       isDuplicate(msgId);
 
       // Transmite via LoRa
-      LoRa.beginPacket();
-      LoRa.print(packet);
-      LoRa.endPacket();
+      int txState = radio.transmit(packet);
+      if (txState != RADIOLIB_ERR_NONE) {
+        Serial.print("[NODE] ERRO no transmit! Código: ");
+        Serial.println(txState);
+      }
 
       msgsSent++;
 
@@ -374,131 +391,124 @@ void loop() {
 
       displayStatus("ENVIANDO...", "ID:" + msgId, msg.substring(0, 20));
 
-      // Volta para modo recepção LoRa
-      LoRa.receive();
+      // Limpa flag que foi disparada pela interrupção de fim de transmissão (TxDone)
+      rxFlag = false;
+
+      // Volta a escutar após transmissão
+      radio.startReceive();
     }
   }
 
   // =====================================================================
   // CAMINHO LoRa: Receber pacotes e decidir (entregar / relay / descartar)
   // =====================================================================
-  int packetSize = LoRa.parsePacket();
-  if (packetSize) {
-    String recebido = "";
-    while (LoRa.available()) {
-      recebido += (char)LoRa.read();
-    }
-    recebido.trim();
+  if (rxFlag) {
+    rxFlag = false;
 
-    int rssi = LoRa.packetRssi();
-    float snr = LoRa.packetSnr();
+    String recebido;
+    int state = radio.readData(recebido);
 
-    Serial.print("[NODE] LoRa raw (RSSI:");
-    Serial.print(rssi);
-    Serial.print(" SNR:");
-    Serial.print(snr);
-    Serial.print("): \"");
-    Serial.print(recebido);
-    Serial.println("\"");
+    if (state == RADIOLIB_ERR_NONE) {
+      recebido.trim();
 
-    // Parse do header mesh
-    MeshPacket pkt = parsePacket(recebido);
+      float rssi = radio.getRSSI();
+      float snr  = radio.getSNR();
 
-    if (!pkt.valid) {
-      Serial.println("[NODE] DESCARTADO (header invalido)");
-      return;
-    }
+      Serial.print("[NODE] LoRa raw (RSSI:");
+      Serial.print(rssi, 1);
+      Serial.print(" SNR:");
+      Serial.print(snr, 1);
+      Serial.print("): \"");
+      Serial.print(recebido);
+      Serial.println("\"");
 
-    Serial.print("[NODE] Parsed: TIPO=");
-    Serial.print(pkt.type);
-    Serial.print(" ID=");
-    Serial.print(pkt.msgId);
-    Serial.print(" TTL=");
-    Serial.println(pkt.ttl);
+      MeshPacket pkt = parsePacket(recebido);
 
-    // ===================================================================
-    // TIPO Q (Pergunta) — Nó cliente nunca processa, apenas faz relay
-    // ===================================================================
-    if (pkt.type == 'Q') {
-      // Verificar duplicata (evita relay de perguntas já vistas)
-      if (isDuplicate(pkt.msgId)) {
-        Serial.println("[NODE] Q DESCARTADO (duplicata: " + pkt.msgId + ")");
-        return;
-      }
-
-      // Relay: retransmitir se TTL > 0
-      if (pkt.ttl > 0) {
-        int newTtl = pkt.ttl - 1;
-        String relayPacket = buildPacket('Q', pkt.msgId, newTtl, pkt.payload);
-
-        delay(RELAY_DELAY_MS);
-
-        LoRa.beginPacket();
-        LoRa.print(relayPacket);
-        LoRa.endPacket();
-
-        msgsRelayed++;
-
-        Serial.print("[NODE] RELAY Q [");
-        Serial.print(pkt.msgId);
-        Serial.print("] TTL:");
-        Serial.print(pkt.ttl);
-        Serial.print("->");
-        Serial.println(newTtl);
-
-        displayStatus("RELAY Q", "ID:" + pkt.msgId, pkt.payload.substring(0, 20));
-
-        LoRa.receive();
+      if (!pkt.valid) {
+        Serial.println("[NODE] DESCARTADO (header invalido)");
       } else {
-        Serial.println("[NODE] Q DESCARTADO (TTL=0)");
-      }
-    }
-
-    // ===================================================================
-    // TIPO R (Resposta) — Verificar se é para mim (MSG_ID pendente)
-    // ===================================================================
-    else if (pkt.type == 'R') {
-      if (isPending(pkt.msgId)) {
-        // É resposta para uma pergunta MINHA!
-        Serial.print("[NODE] RESPOSTA para mim [");
+        Serial.print("[NODE] Parsed: TIPO=");
+        Serial.print(pkt.type);
+        Serial.print(" ID=");
         Serial.print(pkt.msgId);
-        Serial.print("]: \"");
-        Serial.print(pkt.payload);
-        Serial.println("\"");
+        Serial.print(" TTL=");
+        Serial.println(pkt.ttl);
 
-        // Entrega ao app via Bluetooth
-        SerialBT.println(pkt.payload);
-        msgsReceived++;
+        // ===================================================================
+        // TIPO Q (Pergunta) — Nó cliente nunca processa, apenas faz relay
+        // ===================================================================
+        if (pkt.type == 'Q') {
+          if (isDuplicate(pkt.msgId)) {
+            Serial.println("[NODE] Q DESCARTADO (duplicata: " + pkt.msgId + ")");
+          } else if (pkt.ttl > 0) {
+            int newTtl = pkt.ttl - 1;
+            String relayPacket = buildPacket('Q', pkt.msgId, newTtl, pkt.payload);
 
-        displayStatus("RESPOSTA IA", "RSSI:" + String(rssi), pkt.payload.substring(0, 20));
-      } else {
-        // Não é para mim — relay
-        if (pkt.ttl > 0) {
-          int newTtl = pkt.ttl - 1;
-          String relayPacket = buildPacket('R', pkt.msgId, newTtl, pkt.payload);
+            delay(RELAY_DELAY_MS);
 
-          delay(RELAY_DELAY_MS);
+            radio.transmit(relayPacket);
+            rxFlag = false;
+            msgsRelayed++;
 
-          LoRa.beginPacket();
-          LoRa.print(relayPacket);
-          LoRa.endPacket();
+            Serial.print("[NODE] RELAY Q [");
+            Serial.print(pkt.msgId);
+            Serial.print("] TTL:");
+            Serial.print(pkt.ttl);
+            Serial.print("->");
+            Serial.println(newTtl);
 
-          msgsRelayed++;
+            displayStatus("RELAY Q", "ID:" + pkt.msgId, pkt.payload.substring(0, 20));
+          } else {
+            Serial.println("[NODE] Q DESCARTADO (TTL=0)");
+          }
+        }
 
-          Serial.print("[NODE] RELAY R [");
-          Serial.print(pkt.msgId);
-          Serial.print("] TTL:");
-          Serial.print(pkt.ttl);
-          Serial.print("->");
-          Serial.println(newTtl);
+        // ===================================================================
+        // TIPO R (Resposta) — Verificar se é para mim (MSG_ID pendente)
+        // ===================================================================
+        else if (pkt.type == 'R') {
+          if (isResponseDuplicate(pkt.msgId, pkt.payload)) {
+            Serial.println("[NODE] R DESCARTADO (duplicata: " + pkt.msgId + ")");
+          } else if (isPending(pkt.msgId)) {
+            Serial.print("[NODE] RESPOSTA para mim [");
+            Serial.print(pkt.msgId);
+            Serial.print("]: \"");
+            Serial.print(pkt.payload);
+            Serial.println("\"");
 
-          displayStatus("RELAY R", "ID:" + pkt.msgId, pkt.payload.substring(0, 20));
+            SerialBT.println(pkt.payload);
+            msgsReceived++;
 
-          LoRa.receive();
-        } else {
-          Serial.println("[NODE] R DESCARTADO (TTL=0)");
+            displayStatus("RESPOSTA IA", "RSSI:" + String((int)rssi), pkt.payload.substring(0, 20));
+          } else if (pkt.ttl > 0) {
+            int newTtl = pkt.ttl - 1;
+            String relayPacket = buildPacket('R', pkt.msgId, newTtl, pkt.payload);
+
+            delay(RELAY_DELAY_MS);
+
+            radio.transmit(relayPacket);
+            rxFlag = false;
+            msgsRelayed++;
+
+            Serial.print("[NODE] RELAY R [");
+            Serial.print(pkt.msgId);
+            Serial.print("] TTL:");
+            Serial.print(pkt.ttl);
+            Serial.print("->");
+            Serial.println(newTtl);
+
+            displayStatus("RELAY R", "ID:" + pkt.msgId, pkt.payload.substring(0, 20));
+          } else {
+            Serial.println("[NODE] R DESCARTADO (TTL=0)");
+          }
         }
       }
+    } else {
+      Serial.print("[NODE] Erro na recepção! Código: ");
+      Serial.println(state);
     }
+
+    // Volta a escutar
+    radio.startReceive();
   }
 }
