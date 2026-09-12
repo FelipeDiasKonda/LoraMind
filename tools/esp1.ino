@@ -197,7 +197,8 @@ void addPending(String msgId) {
 bool isPending(String msgId) {
   for (int i = 0; i < PENDING_SIZE; i++) {
     if (pendingMsgIds[i] == msgId) {
-      pendingMsgIds[i] = "";
+      // NÃO apaga aqui — a resposta pode vir em múltiplos chunks
+      // com o mesmo msgId. Será limpo por timeout ou overflow natural.
       return true;
     }
   }

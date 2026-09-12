@@ -1,0 +1,132 @@
+\begin{thebibliography}{10}
+
+\bibitem{androidcomposestate2026}
+{Android Developers}.
+\newblock State and jetpack compose.
+\newblock Documenta{\c{c}}{\~a}o oficial do Android, 2026.
+\newblock Dispon{\'i}vel em:
+  \url{https://developer.android.com/develop/ui/compose/state}. Acesso em: 4
+  set. 2026.
+
+\bibitem{androidarchitecture2026}
+{Android Developers}.
+\newblock Guide to app architecture.
+\newblock Documenta{\c{c}}{\~a}o oficial do Android, 2026.
+\newblock Dispon{\'i}vel em:
+  \url{https://developer.android.com/topic/architecture}. Acesso em: 23 ago.
+  2026.
+
+\bibitem{androidroom2026}
+{Android Developers}.
+\newblock Save data in a local database using room.
+\newblock Documenta{\c{c}}{\~a}o oficial do Android, 2026.
+\newblock Dispon{\'i}vel em:
+  \url{https://developer.android.com/training/data-storage/room}. Acesso em: 4
+  set. 2026.
+
+\bibitem{espressifesp322026}
+{Espressif Systems}.
+\newblock {\em {ESP32 Series Datasheet}}, version 5.3 edition, 2026.
+\newblock Dispon{\'i}vel em:
+  \url{https://documentation.espressif.com/esp32_datasheet_en.pdf}. Acesso em:
+  23 ago. 2026.
+
+\bibitem{espressifesp32s32026}
+{Espressif Systems}.
+\newblock {\em {ESP32-S3 Series Datasheet}}, version 2.2 edition, 2026.
+\newblock Dispon{\'i}vel em:
+  \url{https://www.espressif.com/sites/default/files/documentation/esp32-s3_datasheet_en.pdf}.
+  Acesso em: 23 ago. 2026.
+
+\bibitem{heltecwifi32v32026}
+{Heltec Automation}.
+\newblock {\em {WiFi LoRa 32 V3.2 Datasheet}}, 2026.
+\newblock Dispon{\'i}vel em:
+  \url{https://s.heltec.cn/download/WiFi_LoRa_32_V3/HTIT-WB32LA_V3.2.pdf}.
+  Acesso em: 4 set. 2026.
+
+\bibitem{arduinoide2026}
+{Arduino}.
+\newblock {Arduino IDE 2} documentation.
+\newblock Documenta{\c{c}}{\~a}o oficial, 2026.
+\newblock Dispon{\'i}vel em: \url{https://docs.arduino.cc/software/ide/}.
+  Acesso em: 4 set. 2026.
+
+\bibitem{semtechlora2026}
+{Semtech Corporation}.
+\newblock What is {LoRa}?
+\newblock Documenta{\c{c}}{\~a}o oficial, 2026.
+\newblock Dispon{\'i}vel em: \url{https://www.semtech.com/lora/what-is-lora}.
+  Acesso em: 4 set. 2026.
+
+\bibitem{augustin2016study}
+Alo{\"y}s Augustin, Jiazi Yi, Thomas Clausen, and William~Mark Townsley.
+\newblock A study of {LoRa}: Long range and low power networks for the internet
+  of things.
+\newblock {\em Sensors}, 16(9):1466, 2016.
+
+\bibitem{radiolib2026}
+Jan Gromes.
+\newblock {RadioLib}: Universal wireless communication library for embedded
+  devices.
+\newblock Reposit{\'o}rio oficial do projeto, 2026.
+\newblock Dispon{\'i}vel em: \url{https://github.com/jgromes/RadioLib}. Acesso
+  em: 4 set. 2026.
+
+\bibitem{poke2023empirical}
+Brenton Poke and Suleyman Uludag.
+\newblock Empirical evaluation of a {LoRa} mesh network for emergency
+  communication systems.
+\newblock In {\em 14th IEEE Annual Ubiquitous Computing, Electronics \& Mobile
+  Communication Conference (UEMCON)}, pages 637--646. IEEE, 2023.
+
+\bibitem{bluetoothsigsp}
+{Bluetooth SIG}.
+\newblock {\em {Serial Port Profile 1.2}}, s.d.
+\newblock Dispon{\'i}vel em:
+  \url{https://www.bluetooth.com/specifications/specs/serial-port-profile-1-2/}.
+  Acesso em: 4 set. 2026.
+
+\bibitem{androidbluetooth2026}
+{Android Developers}.
+\newblock Connect bluetooth devices.
+\newblock Documenta{\c{c}}{\~a}o oficial do Android, 2026.
+\newblock Dispon{\'i}vel em:
+  \url{https://developer.android.com/develop/connectivity/bluetooth/connect-bluetooth-devices}.
+  Acesso em: 23 ago. 2026.
+
+\bibitem{ollamaapi2026}
+{Ollama}.
+\newblock Api reference: Introduction.
+\newblock Documenta{\c{c}}{\~a}o oficial, 2026.
+\newblock Dispon{\'i}vel em: \url{https://docs.ollama.com/api/introduction}.
+  Acesso em: 23 ago. 2026.
+
+\bibitem{gemmateam2024gemma2}
+{Gemma Team}.
+\newblock {Gemma 2}: Improving open language models at a practical size.
+\newblock arXiv preprint arXiv:2408.00118, 2024.
+
+\bibitem{pyserial2026}
+{pySerial}.
+\newblock pyserial documentation.
+\newblock Documenta{\c{c}}{\~a}o oficial, 2026.
+\newblock Dispon{\'i}vel em: \url{https://pyserial.readthedocs.io/en/latest/}.
+  Acesso em: 4 set. 2026.
+
+\bibitem{androidcomposeviews2026}
+{Android Developers}.
+\newblock Using compose in views.
+\newblock Documenta{\c{c}}{\~a}o oficial do Android, 2026.
+\newblock Dispon{\'i}vel em:
+  \url{https://developer.android.com/develop/ui/compose/migrate/interoperability-apis/compose-in-views}.
+  Acesso em: 6 set. 2026.
+
+\bibitem{semtechrange2018}
+Joseph Knapp.
+\newblock What is {LoRa}?
+\newblock Semtech Blog, 2018.
+\newblock Dispon{\'i}vel em: \url{https://blog.semtech.com/what-is-lora}.
+  Acesso em: 7 set. 2026.
+
+\end{thebibliography}

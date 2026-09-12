@@ -86,6 +86,27 @@ int seenIndex = 0;
 // ============================================================================
 String serialBuffer = "";
 
+// ============================================================================
+// CACHE DE RESPOSTAS ENVIADAS (para ignorar ecos R que voltam via mesh)
+// ============================================================================
+#define SENT_R_CACHE_SIZE 20
+String sentRCache[SENT_R_CACHE_SIZE];
+int sentRIndex = 0;
+
+bool isSentResponse(String msgId) {
+  for (int i = 0; i < SENT_R_CACHE_SIZE; i++) {
+    if (sentRCache[i] == msgId) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void markSentResponse(String msgId) {
+  sentRCache[sentRIndex] = msgId;
+  sentRIndex = (sentRIndex + 1) % SENT_R_CACHE_SIZE;
+}
+
 // MeshPacket definido em mesh_protocol.h
 
 // ============================================================================
@@ -354,8 +375,12 @@ void loop() {
             Serial.println("\"");
           }
         } else {
-          // Tipo R na BS? Não deveria acontecer, mas ignora
-          Serial.println("[BS] R recebido na BS — ignorando (inesperado)");
+          // Tipo R na BS — verificar se é eco de uma resposta que nós mesmos enviamos
+          if (isSentResponse(pkt.msgId)) {
+            // Eco normal da mesh — ignorar silenciosamente
+          } else {
+            Serial.println("[BS] R externo recebido (ID: " + pkt.msgId + ") — ignorando");
+          }
         }
       }
     } else {
@@ -391,6 +416,9 @@ void loop() {
 
           // Monta pacote mesh de resposta
           String packet = buildPacket('R', msgId, DEFAULT_TTL, payload);
+
+          // Marca como enviado (para ignorar ecos que voltam da mesh)
+          markSentResponse(msgId);
 
           // Para recepção, transmite, e volta a receber
           radio.standby();

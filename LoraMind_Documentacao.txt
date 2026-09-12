@@ -1,0 +1,316 @@
+================================================================================
+                          LORAMIND — DOCUMENTAÇÃO DO PROJETO
+                        Comunicação IA Offline via Rede Mesh LoRa
+================================================================================
+
+Autor: Felipe Dias Konda
+Data: Agosto 2026
+
+================================================================================
+1. VISÃO GERAL
+================================================================================
+
+O LoraMind é um sistema de comunicação inteligente que permite a qualquer 
+pessoa enviar perguntas e receber respostas de uma IA (Inteligência Artificial) 
+mesmo estando completamente SEM INTERNET e SEM SINAL DE CELULAR.
+
+A comunicação acontece via rádio LoRa de longo alcance (até 15km em campo 
+aberto), usando uma rede Mesh que permite que mensagens saltem entre nós 
+intermediários até alcançar a Base Station, onde a IA processa e responde.
+
+Cenário principal: situações de emergência — pessoa perdida, veículo quebrado, 
+ferimento em área remota, desastres naturais com infraestrutura destruída.
+
+================================================================================
+2. ARQUITETURA DO SISTEMA
+================================================================================
+
+O sistema possui 4 componentes principais:
+
+  [App Android] ←(Bluetooth)→ [ESP1: Nó Mesh] ←(LoRa 915MHz)→ [ESP2: Base Station] ←(USB Serial)→ [PC + IA]
+
+2.1 App Android (LoraMind)
+    - Interface do usuário final
+    - Conexão via Bluetooth Clássico (SPP/RFCOMM)
+    - Envia perguntas e recebe respostas da IA
+    - Funciona 100% offline
+
+2.2 ESP1 — Nó Mesh (Client Node)
+    - Hardware: ESP32 + módulo LoRa SX1276 (915 MHz)
+    - Display OLED SSD1306 128x64
+    - Bluetooth Clássico para comunicação com o App
+    - Biblioteca LoRa: RadioLib
+    - Funções: receber do app, empacotar, transmitir via LoRa, relay de pacotes
+
+2.3 ESP2 — Base Station (Gateway Mesh)
+    - Hardware: Heltec WiFi LoRa 32 V3.2 (ESP32-S3 + SX1262)
+    - Biblioteca LoRa: RadioLib
+    - Funções: receber pacotes da mesh, enviar para o PC via Serial USB,
+      receber respostas da IA e transmitir de volta para a mesh
+
+2.4 PC + IA (Python Bridge + Ollama)
+    - Script Python: loramind_bridge.py
+    - Modelo de IA: Gemma 2 9B (Google DeepMind)
+    - Framework: Ollama (execução 100% local, sem internet)
+    - Funções: receber perguntas da serial, consultar a IA, dividir em chunks
+      e enviar respostas de volta pela serial
+
+================================================================================
+3. PROTOCOLO MESH
+================================================================================
+
+3.1 Formato do Pacote LoRa:
+
+    LM|TIPO|MSG_ID|TTL|payload
+
+    - LM       : Prefixo fixo (identifica pacote LoraMind)
+    - TIPO     : Q = Question (pergunta) | R = Response (resposta)
+    - MSG_ID   : 4 caracteres alfanuméricos (ex: a7f3) — ~1.7M combinações
+    - TTL      : Hops restantes (0 a 9), decrementado a cada relay
+    - payload  : Conteúdo da mensagem (texto puro)
+
+    Exemplo real: LM|Q|sshm|3|a48d1e:olá estou perdido
+
+3.2 Roteamento (Stateless, por MSG_ID):
+
+    - Pergunta (Q): Sempre encaminhada (relay) até a Base Station.
+      Só a BS processa e consulta a IA.
+    
+    - Resposta (R): Se o MSG_ID está na lista de perguntas pendentes do nó,
+      a resposta é entregue localmente via Bluetooth.
+      Se não é para aquele nó, faz relay para que outros nós recebam.
+
+3.3 Deduplicação:
+
+    - Q packets: Cache de MSG_IDs vistos (evita relay duplicado)
+    - R packets: Cache de MSG_ID + payload (permite múltiplos chunks com
+      o mesmo MSG_ID mas impede retransmissão duplicada do mesmo chunk)
+
+3.4 TTL (Time To Live):
+
+    - Padrão: 3 hops
+    - Decrementado a cada relay
+    - Pacote descartado quando TTL = 0
+
+================================================================================
+4. CONFIGURAÇÃO DE RÁDIO LORA
+================================================================================
+
+Parâmetros idênticos em ambos os módulos (ESP1 e ESP2):
+
+    Frequência:        915.0 MHz (ISM Brasil/América)
+    Bandwidth:         250 kHz
+    Spreading Factor:  7
+    Coding Rate:       4/5
+    Sync Word:         0x12 (rede privada)
+    Potência TX:       10 dBm
+    Preamble:          8 símbolos
+    CRC:               16-bit (2 bytes) habilitado
+    LDRO:              Desativado (forçado)
+    IQ Inversion:      Desativada
+
+Configurações específicas do Heltec V3.2 (ESP2):
+    TCXO Voltage:      1.6V
+    Regulador:         DC-DC (não LDO)
+    DIO2:              Configurado como RF Switch (obrigatório)
+    Vext:              GPIO 36 = LOW (habilita alimentação do rádio)
+
+Nota sobre Bandwidth 250 kHz:
+    O cristal de quartzo do ESP1 (SX1276) apresenta um desvio de frequência
+    de ~30-33 kHz em relação ao TCXO do Heltec V3.2. Com BW de 125 kHz,
+    o limite de tolerância seria 31 kHz (muito próximo do erro medido).
+    Ao usar 250 kHz, a tolerância sobe para 62.5 kHz, absorvendo o desvio
+    com folga e garantindo comunicação confiável.
+
+================================================================================
+5. HARDWARE — PINAGEM
+================================================================================
+
+5.1 ESP1 — Nó Mesh (ESP32 + SX1276):
+
+    SPI:
+      SCK  = GPIO 5
+      MISO = GPIO 19
+      MOSI = GPIO 27
+      SS   = GPIO 18 (Chip Select)
+    
+    LoRa:
+      RST  = GPIO 14
+      DIO0 = GPIO 26 (interrupção de recepção)
+    
+    OLED (I2C):
+      SDA  = GPIO 4
+      SCL  = GPIO 15
+      RST  = GPIO 16
+    
+    Bluetooth: SPP nativo do ESP32
+
+5.2 ESP2 — Base Station (Heltec WiFi LoRa 32 V3.2):
+
+    SPI (FSPI):
+      SCK  = GPIO 9
+      MISO = GPIO 11
+      MOSI = GPIO 10
+      NSS  = GPIO 8 (Chip Select)
+    
+    LoRa (SX1262):
+      RST  = GPIO 12
+      BUSY = GPIO 13
+      DIO1 = GPIO 14 (interrupção de recepção)
+    
+    Alimentação:
+      Vext = GPIO 36 (LOW = liga alimentação do rádio)
+
+================================================================================
+6. MODELO DE IA
+================================================================================
+
+    Nome:           Gemma 2
+    Desenvolvedor:  Google DeepMind
+    Parâmetros:     9.2 bilhões (9B)
+    Tamanho:        ~5.4 GB (quantizado Q4)
+    Framework:      Ollama (execução local)
+    Licença:        Gemma License (gratuito para uso pessoal/acadêmico/comercial)
+    Idiomas:        Multilíngue (português, inglês, espanhol, etc.)
+    Contexto:       8.192 tokens (~6.000 palavras)
+    GPU necessária: NVIDIA com 8GB+ VRAM
+
+    Execução: 100% local, sem internet, sem API key, sem limites de uso.
+
+    Prompt de sistema configurado para:
+    - Perguntas gerais: responde com conhecimento treinado (factual)
+    - Emergências: foca em ações práticas que a pessoa pode fazer sozinha,
+      sem sugerir ligar para alguém ou buscar infraestrutura externa
+
+================================================================================
+7. BRIDGE PYTHON (loramind_bridge.py)
+================================================================================
+
+    Protocolo Serial:
+      Recebe:  MSG_LORAMIND:MSG_ID|CONV_ID:mensagem
+      Envia:   RESP_AI:MSG_ID|resposta
+
+    Funcionalidades:
+    - Auto-detecção da porta COM do ESP2
+    - Histórico de conversa por conv_id (máximo 5 trocas)
+    - Streaming de tokens do Ollama
+    - Limpeza de respostas (remove formatação, meta-comentários)
+    - Divisão em chunks de 200 caracteres para LoRa
+    - Delay de 2 segundos entre chunks
+    - Modo teste (--test) para validar sem hardware
+    - Logs coloridos com timestamp
+
+================================================================================
+8. FLUXO COMPLETO DE UMA MENSAGEM
+================================================================================
+
+CAMINHO DE IDA (Pergunta):
+
+    1. Usuário digita no App Android
+    2. App envia via Bluetooth para ESP1
+    3. ESP1 gera MSG_ID, empacota: LM|Q|MSG_ID|3|CONV_ID:texto
+    4. ESP1 transmite via LoRa 915MHz
+    5. (Opcional) Nós intermediários fazem relay (TTL--)
+    6. ESP2 (Base Station) recebe o pacote
+    7. ESP2 envia para PC via Serial USB: MSG_LORAMIND:MSG_ID|CONV_ID:texto
+    8. Python Bridge recebe, consulta Ollama (Gemma 2 9B)
+    9. IA gera resposta (~3-5 segundos)
+
+CAMINHO DE VOLTA (Resposta):
+
+    10. Bridge envia: RESP_AI:MSG_ID|resposta
+    11. ESP2 recebe, empacota: LM|R|MSG_ID|3|resposta
+    12. ESP2 transmite via LoRa
+    13. (Opcional) Nós intermediários fazem relay
+    14. ESP1 recebe, verifica MSG_ID na lista de pendentes
+    15. Se é para ele: entrega via Bluetooth ao App
+    16. Se não: faz relay para outros nós
+    17. App exibe a resposta ao usuário
+
+    Tempo total típico (ida + IA + volta): 5 a 10 segundos
+
+================================================================================
+9. BIBLIOTECAS E DEPENDÊNCIAS
+================================================================================
+
+    Arduino/ESP32:
+    - RadioLib (comunicação LoRa para SX1276 e SX1262)
+    - Adafruit_GFX + Adafruit_SSD1306 (display OLED)
+    - BluetoothSerial (Bluetooth clássico SPP)
+    - SPI (barramento SPI)
+    - Wire (barramento I2C)
+
+    Python:
+    - pyserial (comunicação serial USB)
+    - requests (API local do Ollama)
+    - ollama (framework de modelos de IA locais)
+
+    Android:
+    - Kotlin/Java
+    - Bluetooth SPP/RFCOMM
+
+================================================================================
+10. ARQUIVOS DO PROJETO
+================================================================================
+
+    tools/esp1.ino              — Firmware do Nó Mesh (ESP32 + SX1276)
+    tools/esp2.ino              — Firmware da Base Station (Heltec V3.2 + SX1262)
+    tools/mesh_protocol.h       — Header compartilhado (struct MeshPacket)
+    tools/loramind_bridge.py    — Bridge Serial <-> Ollama (Python)
+    app/                        — Aplicativo Android (Kotlin)
+
+================================================================================
+11. COMO EXECUTAR
+================================================================================
+
+    Pré-requisitos:
+    1. Arduino IDE com suporte ESP32 instalado
+    2. Biblioteca RadioLib instalada
+    3. Python 3.x com pyserial e requests
+    4. Ollama instalado (https://ollama.ai)
+    5. Modelo Gemma 2 9B baixado: ollama pull gemma2:9b
+
+    Passo a passo:
+    1. Abra esp1.ino no Arduino IDE, selecione "ESP32 Dev Module", faça upload
+    2. Abra esp2.ino, selecione "Heltec WiFi LoRa 32 (V3)", faça upload
+    3. Conecte o ESP2 ao PC via USB
+    4. Esquente o modelo: ollama run gemma2:9b "olá"
+    5. Inicie a bridge: python tools/loramind_bridge.py
+    6. Abra o App LoraMind no celular, conecte via Bluetooth
+    7. Envie uma mensagem e aguarde a resposta da IA
+
+================================================================================
+12. PROBLEMAS RESOLVIDOS DURANTE O DESENVOLVIMENTO
+================================================================================
+
+    12.1 Incompatibilidade SX1276 ↔ SX1262:
+         - Problema: A biblioteca LoRa.h (Sandeep Mistry) só suporta SX1276.
+           Dados chegavam corrompidos no SX1262.
+         - Solução: Migrar ambos os lados para RadioLib, garantindo
+           codificação de pacotes idêntica.
+
+    12.2 Dados corrompidos (caracteres estranhos):
+         - Problema: RSSI de -28 dBm com SNR:2.0 — receptor saturado.
+         - Causa: Potência TX de 17 dBm a poucos centímetros de distância.
+         - Solução: Reduzir potência para 10 dBm e separar os módulos.
+
+    12.3 Frequency Error de 30.5 kHz:
+         - Problema: Cristal do SX1276 com desvio natural vs TCXO do SX1262.
+         - Causa: Bandwidth de 125 kHz tem tolerância de apenas 31 kHz.
+         - Solução: Aumentar Bandwidth para 250 kHz (tolerância: 62.5 kHz).
+
+    12.4 App recebia apenas o 1º chunk da resposta:
+         - Problema: isPending() apagava o MSG_ID após o primeiro chunk.
+         - Solução: Manter o MSG_ID na lista para todos os chunks.
+
+    12.5 Heltec V3.2 não inicializava o rádio:
+         - Problema: Vext (GPIO 36) precisa ser ativado na V3.2.
+         - Solução: pinMode(36, OUTPUT); digitalWrite(36, LOW);
+
+    12.6 Modelo de IA sugeria "ligar para alguém":
+         - Problema: qwen2.5:3b não seguia instruções de emergência.
+         - Solução: Migrar para gemma2:9b com prompt otimizado.
+
+================================================================================
+FIM DO DOCUMENTO
+================================================================================
